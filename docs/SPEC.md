@@ -19,15 +19,27 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 
 ## 2. 角色定义
 
-### 2.1 Owner（主对话）
+### 2.1 Owner（管理员）
 
-判定条件：`agentId === "main"` 且来自 OpenClaw 配置中 `channel.allowFrom` 列表的发送方。
+判定条件：`agentId` 在 `ownerAgents` 列表中（默认包含 `"main"`），且来自 OpenClaw 配置中 `channel.allowFrom` 列表的发送方。
+
+> **多端管理**：Owner 可添加额外的 bot 为管理员，方便从手机（微信等）执行 `/tenant` 命令。
 
 权限：
 - 全部工具无限制
 - 全局记忆读写
 - 执行所有管理命令（`/tenant`）
 - 查看 API Key、系统信息、配置
+- **管理其他 Owner bot**（`/tenant owner add/remove`）
+
+##### Owner 身份判定逻辑
+
+```javascript
+function isOwner(ctx) {
+  const ownerAgents = loadTenantsSync(tenantsPath).ownerAgents || ["main"];
+  return ownerAgents.includes(ctx.agentId);
+}
+```
 
 ### 2.2 Tenant（租户 Bot）
 
@@ -189,6 +201,28 @@ Owner 可在创建后随时修改租户配置：
 
 修改 `tenants.json` 中的配置，不修改 `openclaw.json`，无需重启。
 
+#### 3.1.6 Owner Bot 管理
+
+Owner 可添加额外的 agent 为管理员，方便从手机操作：
+
+```
+/tenant owner add <agentId>       ← 添加管理员 bot
+/tenant owner remove <agentId>    ← 移除管理员 bot（不能移除 main）
+/tenant owner list                ← 列出所有管理员 bot
+```
+
+**使用场景：**
+
+1. Owner 在电脑上通过 Control UI 创建一个 `admin-wx` agent，绑定到自己的微信
+2. 执行 `/tenant owner add admin-wx`
+3. 之后在手机微信上直接发 `/tenant list`、`/tenant create` 等命令
+
+**安全约束：**
+- `ownerAgents` 列表存储在 `tenants.json` 中，不存 `openclaw.json`
+- `main` 永远不能被移除
+- 只有已在 `ownerAgents` 列表中的 agent 才能执行 `/tenant owner add`
+- 添加的 agentId 必须已存在于 `openclaw.json` 的 `agents.list` 中
+
 ### 3.2 配额管理
 
 #### 3.2.1 配额维度
@@ -224,6 +258,7 @@ Owner 可在创建后随时修改租户配置：
 
 ```jsonc
 {
+  "ownerAgents": ["main"],  // 具有管理权限的 agent 列表，可添加多个
   "defaults": {
     "quota": {
       "maxTokens": 100000,
