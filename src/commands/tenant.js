@@ -369,6 +369,27 @@ async function handleCleanup(api, db, args) {
   return { text: `🧹 清理完成: ${success} 成功, ${failed} 失败` };
 }
 
+// ── Command: profile ─────────────────────
+function handleProfile(db, args) {
+  const tenantId = args._[0];
+  if (!tenantId) return { text: "❌ 用法: /tenant profile <id>" };
+
+  const profile = db.prepare("SELECT * FROM profiles WHERE agent_id = ?").get(tenantId);
+  if (!profile) return { text: `❌ 租户 ${tenantId} 暂无画像数据（还未进行过会话）` };
+
+  return {
+    text: [
+      `👤 ${tenantId} 画像信息：`,
+      `  名称:     ${profile.label || tenantId}`,
+      `  首次使用: ${profile.first_seen || "N/A"}`,
+      `  最后活跃: ${profile.last_seen || "N/A"}`,
+      `  会话数:   ${profile.session_count}`,
+      `  总 Token: ${profile.total_tokens}`,
+      `  总调用:   ${profile.total_calls}`,
+    ].join("\n"),
+  };
+}
+
 // ── Main handler ──────────────────────────────────
 export function createTenantCommandHandler(api, db) {
   return async (ctx) => {
@@ -385,6 +406,7 @@ export function createTenantCommandHandler(api, db) {
       case "config":  return handleConfig(restArgs);
       case "owner":   return handleOwner(restArgs);
       case "cleanup": return handleCleanup(api, db, restArgs);
+      case "profile": return handleProfile(db, restArgs);
       case "help":
       default:
         return {

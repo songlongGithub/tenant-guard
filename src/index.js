@@ -2,6 +2,7 @@ import { initUsageDb } from "./store/usage-db.js";
 import { createTenantsConfigLoader } from "./store/tenants-config.js";
 import { onLlmOutput, onBeforeToolCall, onBeforePromptBuild } from "./hooks/quota.js";
 import { onOwnerNotify } from "./hooks/notify.js";
+import { onBeforeReset } from "./hooks/profile.js";
 import { createTenantCommandHandler } from "./commands/tenant.js";
 import { log } from "./utils/logger.js";
 
@@ -26,7 +27,8 @@ export default {
     // ── M5: Notification hook ─────────────────────
     api.on("before_prompt_build", onOwnerNotify(dataDir), { priority: -10 });
 
-    // ── M4: Profile hooks (added later) ──────────
+    // ── M4: Profile hook ──────────────────────
+    api.on("before_reset", onBeforeReset(db), { priority: -10 });
 
     // ── M3: Tenant management command ────────────
     api.registerCommand({
