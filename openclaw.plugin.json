@@ -1,0 +1,7 @@
+{
+  "id": "tenant-guard",
+  "name": "Tenant Guard",
+  "description": "Multi-tenant authorization, quota, memory isolation, and profiling",
+  "version": "1.0.0",
+  "entry": "src/index.js"
+}

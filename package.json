@@ -1,0 +1,14 @@
+{
+  "name": "tenant-guard",
+  "version": "1.0.0",
+  "description": "Multi-tenant authorization, quota, and memory isolation plugin for OpenClaw",
+  "main": "src/index.js",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

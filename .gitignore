@@ -4,3 +4,4 @@ node_modules/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+node_modules
