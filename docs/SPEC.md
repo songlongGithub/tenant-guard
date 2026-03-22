@@ -33,11 +33,14 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 
 判定条件：`agentId !== "main"`，且在 `tenants.json` 中有对应配置。
 
-权限：
-- 工具仅限：`read`、`web_search`、`image`、`memory_search`（只读）、`memory_get`（只读）
-- 明确禁止：`exec`、`write`、`edit`、`session_status` 及所有 shell/管理操作
-- 全局记忆只读（不可触发 session-memory hook 写入）
+权限（均可由 Owner 自定义）：
+- 工具默认：`read`、`web_search`、`image`、`memory_search`（只读）、`memory_get`（只读）
+- 默认禁止：`exec`、`write`、`edit`、`session_status` 及所有 shell/管理操作
+- **Owner 可通过 `--tools` 自定义工具集**，也可创建后通过 `/tenant config` 修改
+- 全局记忆默认只读（可配置关闭）
 - 受配额约束（tokens / calls / 时间）
+- 受超限策略约束（拒绝 或 降速）
+- 受回复语言约束（可配置）
 
 ---
 
@@ -62,8 +65,13 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 | `--roles` | Discord 角色 IDs（逗号分隔）| `admin,vip` |
 | `--name` | 租户显示名称 | `"体验用户A"` |
 | `--model` | 租户使用的 LLM 模型（可选） | `bailian/qwen3.5-plus` |
+| `--tools` | 允许的工具列表（可选，逗号分隔） | `read,web_search,image` |
+| `--language` | 回复语言约束（可选） | `zh` / `en` / `auto` |
+| `--over-limit` | 超限行为（可选） | `reject`（默认）/ `downgrade` |
+| `--downgrade-model` | 降速时切换的模型 | `bailian/qwen3.5-plus` |
+| `--system-prompt` | 系统提示词（可选，支持模板） | `"你是客服助手"` |
 
-> **v1.1 新增**：Owner 可通过 `--model` 为租户指定独立模型，不指定则继承 `agents.defaults.model`。
+> **v1.1 新增**：Owner 可通过以上参数自定义租户能力，所有可选参数均有默认值。
 
 ##### Agent 创建规则
 
@@ -150,7 +158,7 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 完全清除：删除 agent + binding + 配额 + usage + profile + workspace 目录。
 **不可恢复**，执行前要求 Owner 二次确认（输入 tenantId 确认）。
 
-#### 3.1.3 列出租户
+#### 3.1.4 列出租户
 
 命令：`/tenant list`
 
@@ -162,6 +170,24 @@ tenant-a  qqbot:bot1       tokens: 12000/500000  calls: 8/200   ✅ 活跃
 tenant-b  telegram:123456  tokens: 498000/500000 calls: 195/200 ⚠️ 即将超限
 tenant-c  discord:guild99  tokens: 501000/500000 calls: 201/200 🚫 已超限
 ```
+
+#### 3.1.5 修改租户配置
+
+命令：`/tenant config <tenantId> [options]`
+
+Owner 可在创建后随时修改租户配置：
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--model <m>` | 切换模型 | `--model bailian/kimi-k2.5` |
+| `--tools <list>` | 修改工具列表 | `--tools read,web_search,code` |
+| `--language <lang>` | 修改回复语言 | `--language en` |
+| `--over-limit <mode>` | 修改超限行为 | `--over-limit downgrade` |
+| `--downgrade-model <m>` | 修改降速模型 | `--downgrade-model bailian/qwen3.5-plus` |
+| `--system-prompt <text>` | 修改系统提示词 | `--system-prompt "新提示"` |
+| `--memory-read on\|off` | 全局记忆只读 | `--memory-read off` |
+
+修改 `tenants.json` 中的配置，不修改 `openclaw.json`，无需重启。
 
 ### 3.2 配额管理
 
@@ -205,11 +231,22 @@ tenant-c  discord:guild99  tokens: 501000/500000 calls: 201/200 🚫 已超限
       "expiresAt": null,
       "resetInterval": "daily"
     },
+    "tools": {
+      "allow": ["read", "web_search", "image", "memory_search", "memory_get"],
+      "deny": ["exec", "write", "edit", "session_status"]
+    },
     "memory": {
       "globalRead": true,
       "globalWrite": false
-    }
+    },
+    "overLimit": {
+      "action": "reject",         // "reject" | "downgrade"
+      "downgradeModel": null      // 降速时切换的模型
+    },
+    "language": "auto",            // "auto" | "zh" | "en" | "ja" 等
+    "systemPrompt": null           // 默认无自定义提示词，使用模板
   },
+  "systemPromptTemplate": "你是 {name}，一个 AI 助手。\n{language_hint}\n体验额度：{maxTokens} tokens / {maxCalls} 次调用。",
   "tenants": {
     "tenant-a": {
       "label": "体验用户A",
@@ -219,35 +256,83 @@ tenant-c  discord:guild99  tokens: 501000/500000 calls: 201/200 🚫 已超限
         "expiresAt": "2026-04-01T00:00:00+08:00",
         "resetInterval": "daily"
       },
+      "tools": {
+        "allow": ["read", "web_search", "image", "code"],  // 自定义
+        "deny": ["exec", "write", "edit"]
+      },
       "memory": {
         "globalRead": true,
         "globalWrite": false
-      }
+      },
+      "overLimit": {
+        "action": "downgrade",
+        "downgradeModel": "bailian/qwen3.5-plus"
+      },
+      "language": "zh",
+      "systemPrompt": "你是一个客服助手，只回答产品相关问题"
     }
   }
 }
 ```
 
-### 3.3 超额提示机制
+### 3.3 超额提示与超限策略
 
 #### 3.3.1 租户侧提示（三层）
 
 | 层级 | Hook | 触发时机 | 呈现方式 |
 |------|------|---------|---------|
 | 预警 | `before_prompt_build` | 用量 ≥ 80% | Agent 回复末尾追加提醒 |
-| 拦截 | `before_tool_call` | 用量 ≥ 100% 时所有 tool 调用 | `blockReason` 告知 agent，agent 转述用户 |
+| 拦截/降速 | `before_tool_call` | 用量 ≥ 100% | 根据 `overLimit.action` 决定 |
 | 超时 | `before_prompt_build` | `expiresAt` 已过期 | Agent 直接告知无法服务 |
+
+#### 3.3.2 超限行为（overLimit）
+
+Owner 可为每个租户指定超限后的行为：
+
+| 模式 | 说明 |
+|------|------|
+| `reject`（默认） | 超限后 `before_tool_call` 返回 `{ block: true }`，拒绝所有工具调用 |
+| `downgrade` | 超限后切换到更便宜的模型，继续服务但质量降低 |
+
+**`downgrade` 模式实现：**
+
+```javascript
+// before_prompt_build 中检查超限
+if (overLimit.action === "downgrade" && isOverLimit(usage, quota)) {
+  // 动态切换 agent 的 session model
+  // 通过 prependContext 告知 agent 已降速
+  return {
+    prependContext: `⚠️ 额度已用完，已切换到快速模式，回复质量可能降低。`
+  };
+}
+```
+
+配置示例：
+```jsonc
+{
+  "overLimit": {
+    "action": "downgrade",
+    "downgradeModel": "bailian/qwen3.5-plus"  // 降速时使用的便宜模型
+  }
+}
+```
 
 预警消息模板：
 ```
 ⚠️ 提示：你的额度已使用 {ratio}%（{tokens}/{maxTokens} tokens，{calls}/{maxCalls} 次调用），还剩约 {remaining} 重置。
 ```
 
-超限消息模板：
+超限消息模板（reject 模式）：
 ```
 🚫 你的体验额度已用完（{tokens}/{maxTokens} tokens，{calls}/{maxCalls} 次调用）。
 下次重置时间：{resetTime}（约 {remaining}）。
 如需继续使用，请联系管理员续期。
+```
+
+降速消息模板（downgrade 模式）：
+```
+⚠️ 你的快速额度已用完，已切换到快速模式。回复速度更快但质量可能略有下降。
+```
 ```
 
 #### 3.3.2 Owner 侧通知（通知队列）
@@ -269,6 +354,60 @@ Owner 提醒时机：Owner 主对话的下一次 `before_prompt_build`
 ```
 
 读取后清空通知队列（drain 操作）。
+
+#### 3.3.4 系统提示词与语言配置
+
+##### 系统提示词模板
+
+`tenants.json` 中定义全局模板和租户自定义提示词：
+
+```jsonc
+{
+  "systemPromptTemplate": "你是 {name}，一个 AI 助手。\n{language_hint}\n体验额度：{maxTokens} tokens / {maxCalls} 次调用。",
+  "tenants": {
+    "tenant-a": {
+      "systemPrompt": "你是一个客服助手，只回答产品相关问题"  // 覆盖模板
+    }
+  }
+}
+```
+
+**模板变量：**
+
+| 变量 | 说明 | 示例值 |
+|------|------|--------|
+| `{name}` | 租户显示名称（`label` 或 `tenantId`）| `体验用户A` |
+| `{language_hint}` | 语言约束提示（根据 `language` 字段生成）| `请使用中文回复。` |
+| `{maxTokens}` | Token 上限 | `500000` |
+| `{maxCalls}` | 调用次数上限 | `200` |
+| `{expiresAt}` | 过期时间 | `2026-04-01` |
+
+**应用时机：** `before_prompt_build` hook 中，以 `prependContext` 注入。
+
+##### 首次使用自动提示
+
+租户首次发消息时（`profiles.session_count === 0`），自动在回复前注入欢迎提示：
+
+```
+👋 你好！我是 {name}。
+📊 体验额度：{maxTokens} tokens / {maxCalls} 次调用
+⏰ 有效期至：{expiresAt}
+💡 支持的能力：{tools_list}
+
+有任何问题都可以问我！
+```
+
+##### 语言约束
+
+`language` 字段控制 Agent 的回复语言，通过系统提示词实现：
+
+| 值 | 注入内容 |
+|----|---------|
+| `auto` | 无额外约束，Agent 自动匹配用户语言 |
+| `zh` | `请始终使用中文回复用户。` |
+| `en` | `Please always reply in English.` |
+| `ja` | `常に日本語で返信してください。` |
+| 其他 | `请使用{language}回复用户。` |
 
 ### 3.4 记忆隔离
 
