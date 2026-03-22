@@ -141,6 +141,210 @@ const resetIfNeeded = db.transaction((agentId, now) => { ... });
 
 ---
 
+### 4.6 openclaw.json 编辑安全
+
+#### 写入前验证
+
+```javascript
+const TENANT_ID_REGEX = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
+const RESERVED_IDS = new Set(["main", "system", "cron", "heartbeat", "probe"]);
+const MAX_TENANTS = 20;
+
+function validateBeforeWrite(config, tenantId, options) {
+  const errors = [];
+
+  // 1. ID 格式
+  if (!TENANT_ID_REGEX.test(tenantId)) {
+    errors.push(`ID "${tenantId}" 格式无效（仅小写字母/数字/连字符，3-32 字符）`);
+  }
+
+  // 2. 保留 ID
+  if (RESERVED_IDS.has(tenantId)) {
+    errors.push(`"${tenantId}" 是保留 ID`);
+  }
+
+  // 3. 唯一性
+  const existingIds = new Set(config.agents?.list?.map(a => a.id) || []);
+  if (existingIds.has(tenantId)) {
+    errors.push(`Agent ID "${tenantId}" 已存在`);
+  }
+
+  // 4. 租户上限
+  const tenantCount = (config.agents?.list || []).filter(a => a.id !== "main").length;
+  if (tenantCount >= MAX_TENANTS) {
+    errors.push(`已达租户上限 ${MAX_TENANTS}`);
+  }
+
+  // 5. Model 引用有效性
+  if (options.model) {
+    const slash = options.model.indexOf("/");
+    if (slash === -1) {
+      errors.push(`Model 格式无效，需 "provider/modelId"`);
+    } else {
+      const provider = options.model.slice(0, slash);
+      const modelId = options.model.slice(slash + 1);
+      const providerConfig = config.models?.providers?.[provider];
+      if (!providerConfig) {
+        errors.push(`Provider "${provider}" 不存在，可用: ${Object.keys(config.models?.providers || {}).join(", ")}`);
+      } else {
+        const modelExists = providerConfig.models?.some(m => m.id === modelId);
+        if (!modelExists) {
+          errors.push(`Model "${modelId}" 在 provider "${provider}" 中未找到`);
+        }
+      }
+    }
+  }
+
+  // 6. Binding 冲突
+  if (options.channel) {
+    const conflict = (config.agents?.bindings || []).find(b =>
+      b.channel === options.channel &&
+      (!options.account || b.accountId === options.account) &&
+      (!options.peer || b.match?.["peer.id"] === options.peer)
+    );
+    if (conflict) {
+      errors.push(`该 channel+peer 已绑定到 agent "${conflict.agentId}"`);
+    }
+  }
+
+  return errors;
+}
+```
+
+#### 安全写入 + 写入后验证
+
+```javascript
+async function safeWriteConfig(api, newConfig, { expectAgentId, expectRemoved = false }) {
+  try {
+    // 写入（内部自动 .bak 备份 + Zod 校验）
+    await api.runtime.config.writeConfigFile(newConfig);
+  } catch (err) {
+    return { ok: false, error: `配置写入失败: ${err.message}\n.bak 备份已自动创建` };
+  }
+
+  // 写入后验证
+  if (expectAgentId) {
+    const reloaded = api.runtime.config.loadConfig();
+    const found = reloaded.agents?.list?.some(a => a.id === expectAgentId);
+    if (expectRemoved && found) {
+      log.warn(`writeConfigFile 成功但 agent "${expectAgentId}" 仍出现在配置中`);
+    }
+    if (!expectRemoved && !found) {
+      log.warn(`writeConfigFile 成功但 agent "${expectAgentId}" 未出现在配置中`);
+    }
+  }
+
+  return { ok: true };
+}
+```
+
+#### handleCreate 完整流程
+
+```javascript
+async function handleCreate(api, tenantId, options) {
+  const config = api.runtime.config.loadConfig();
+
+  // 1. 写入前验证
+  const errors = validateBeforeWrite(config, tenantId, options);
+  if (errors.length > 0) {
+    return { text: `❌ 创建失败:\n${errors.map(e => `  • ${e}`).join("\n")}` };
+  }
+
+  // 2. 构建新配置
+  const newConfig = structuredClone(config);
+  newConfig.agents ??= {};
+  newConfig.agents.list ??= [];
+  newConfig.agents.bindings ??= [];
+
+  const agentEntry = {
+    id: tenantId,
+    workspace: { dir: `~/.openclaw/workspaces/${tenantId}` },
+    tools: {
+      profile: "minimal",
+      allow: ["read", "web_search", "image", "memory_search", "memory_get"],
+      deny: ["exec", "write", "edit", "session_status"]
+    }
+  };
+  if (options.model) {
+    agentEntry.model = { primary: options.model, fallbacks: [] };
+  }
+  newConfig.agents.list.push(agentEntry);
+
+  newConfig.agents.bindings.push({
+    agentId: tenantId,
+    channel: options.channel,
+    ...(options.account && { accountId: options.account }),
+    ...(options.peer && { match: { "peer.id": options.peer } })
+  });
+
+  // maxConcurrent 调整
+  const tenantCount = newConfig.agents.list.filter(a => a.id !== "main").length;
+  const recommended = tenantCount + 2;
+  newConfig.agents.defaults ??= {};
+  if ((newConfig.agents.defaults.maxConcurrent ?? 1) < recommended) {
+    newConfig.agents.defaults.maxConcurrent = recommended;
+  }
+
+  // 3. 安全写入 + 验证
+  const result = await safeWriteConfig(api, newConfig, { expectAgentId: tenantId });
+  if (!result.ok) return { text: result.error };
+
+  // 4. 更新 tenants.json + SQLite
+  addTenantQuota(tenantId, options.quota);
+  ensureUsageRow(db, tenantId);
+
+  return {
+    text: `✅ 租户 ${tenantId} 已创建\n` +
+      (options.model ? `📦 模型: ${options.model}\n` : "") +
+      `⚠️ 需要重启 gateway 生效`
+  };
+}
+```
+
+### 4.7 租户回收
+
+```javascript
+async function handleCleanup(api, db, config, options) {
+  const tenants = loadTenantsSync(tenantsPath);
+  const now = Date.now();
+  const candidates = [];
+
+  for (const [id, quota] of Object.entries(tenants)) {
+    const usage = db.prepare("SELECT * FROM usage WHERE agent_id = ?").get(id);
+    const profile = db.prepare("SELECT * FROM profiles WHERE agent_id = ?").get(id);
+
+    if (options.expired && quota.expiresAt && new Date(quota.expiresAt).getTime() < now) {
+      candidates.push({ id, reason: `过期于 ${quota.expiresAt}` });
+    }
+    if (options.inactiveDays && profile?.last_seen) {
+      const daysSince = (now - new Date(profile.last_seen).getTime()) / 86400000;
+      if (daysSince > options.inactiveDays) {
+        candidates.push({ id, reason: `不活跃 ${Math.floor(daysSince)} 天` });
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    return { text: "✅ 没有需要清理的租户" };
+  }
+
+  if (options.dryRun) {
+    const list = candidates.map(c => `  • ${c.id}: ${c.reason}`).join("\n");
+    return { text: `🔍 预览（不执行删除）:\n${list}` };
+  }
+
+  let success = 0, failed = 0;
+  for (const c of candidates) {
+    const result = await handleDelete(api, c.id);
+    if (result.text.startsWith("✅")) success++; else failed++;
+  }
+
+  return { text: `🧹 清理完成: ${success} 成功, ${failed} 失败` };
+}
+```
+
+---
+
 ## 5. 开发里程碑
 
 | 阶段 | 内容 | 依赖 |
@@ -148,7 +352,7 @@ const resetIfNeeded = db.transaction((agentId, now) => { ... });
 | **M1** | 文档更新（本文档） | ✅ 完成 |
 | **M2** | 配额执行核心（SQLite + 3 个 Hook） | — |
 | **M5** | Owner 通知队列（与 M2 耦合，紧跟开发） | M2 |
-| **M3** | `/tenant` 管理命令 | M2 |
+| **M3** | `/tenant` 管理命令 + 配置验证 | M2 |
 | **M4** | 租户画像 + 关键词提取 | M2 |
 | **M6** | 集成测试 + 部署 | ALL |
 

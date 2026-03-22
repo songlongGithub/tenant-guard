@@ -65,15 +65,33 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 
 > **v1.1 新增**：Owner 可通过 `--model` 为租户指定独立模型，不指定则继承 `agents.defaults.model`。
 
-执行流程：
+##### Agent 创建规则
+
+| 规则 | 说明 |
+|------|------|
+| ID 命名 | 仅允许小写字母、数字、连字符，3-32 字符，正则：`/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/` |
+| 保留 ID | `main`、`system`、`cron`、`heartbeat`、`probe` 不可用作租户名 |
+| 唯一性 | 同一 gateway 内 agentId 不可重复 |
+| Model 引用 | `--model` 指定的 `provider/modelId` 必须在当前 `openclaw.json` 的 models.providers 中已注册 |
+| Binding 唯一 | 同一 channel + accountId + peer 组合不可绑定到多个 agent |
+| Workspace | 自动创建独立目录 `~/.openclaw/workspaces/{tenantId}`，不与 main 共享 |
+| Tools 约束 | 固定 profile `minimal`，deny 列表包含 `exec`/`write`/`edit`/`session_status` |
+| 最大租户数 | v1 限制 20 个（防止 openclaw.json 过大和 maxConcurrent 过高） |
+
+##### 执行流程
+
 1. 检查 `isAuthorizedSender`，否则拒绝
-2. 检查 `tenantId` 不重复
-3. 向 `openclaw.json` 的 `agents.list` 添加受限 agent 配置（含独立 model 和 workspace）
-4. 向 `openclaw.json` 的 `agents.bindings` 添加路由规则
-5. 自动调整 `agents.defaults.maxConcurrent`（租户数 + 2）
-6. 向 `tenants.json` 写入默认配额
-7. 初始化 `data/profiles/{tenantId}/` 目录
-8. 提示 Owner 重启 gateway 生效
+2. 验证 tenantId 格式和唯一性
+3. 验证 `--model` 引用有效性（provider 和 model 均存在）
+4. 验证 binding 不冲突
+5. 向 `openclaw.json` 的 `agents.list` 添加受限 agent 配置（含独立 model 和 workspace）
+6. 向 `openclaw.json` 的 `agents.bindings` 添加路由规则
+7. 自动调整 `agents.defaults.maxConcurrent`（租户数 + 2）
+8. 写入后验证：重新加载配置，确认 agent 和 binding 已生效
+9. 向 `tenants.json` 写入默认配额
+10. SQLite 插入 usage 初始行
+11. 初始化 `data/profiles/{tenantId}/` 目录
+12. 提示 Owner 重启 gateway 生效
 
 #### 3.1.2 删除租户
 
@@ -81,10 +99,56 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 
 执行流程：
 1. 权限检查
-2. 从 `openclaw.json` 移除 agent + binding
-3. 从 `tenants.json` 移除配额配置
-4. 保留 `data/profiles/{tenantId}/` 历史数据（不删除，供分析）
-5. 提示重启生效
+2. 确认 tenantId 存在且不是 `main`
+3. 从 `openclaw.json` 移除 agent + 所有相关 binding
+4. 写入后验证：重新加载配置，确认 agent 已移除
+5. 从 `tenants.json` 移除配额配置
+6. 从 SQLite 删除 usage 行
+7. 保留 `data/profiles/{tenantId}/` 历史数据（不删除，供分析）
+8. 提示重启生效
+
+#### 3.1.3 租户回收规则
+
+对过期或不活跃租户的自动/手动回收机制：
+
+##### 自动标记（每次 hook 触发时检查）
+
+| 条件 | 状态标记 | 行为 |
+|------|---------|------|
+| `expiresAt` 已过期 | `expired` | `before_prompt_build` 注入过期提示，`before_tool_call` 拦截所有调用 |
+| Token 和 Calls 均超限 | `exhausted` | 同上 |
+| 距离 `last_seen` 超过配置天数 | `inactive` | 仅标记，不自动拦截 |
+
+> 自动标记**不会自动删除** agent 或修改 `openclaw.json`，仅在运行时拦截。
+
+##### 手动回收
+
+```
+/tenant cleanup [--expired] [--inactive-days <N>] [--dry-run]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--expired` | 清理所有已过期租户 |
+| `--inactive-days <N>` | 清理最后活跃超过 N 天的租户（默认 90 天） |
+| `--dry-run` | 仅预览，不执行删除 |
+
+执行流程：
+1. 列出符合条件的租户
+2. `--dry-run` 时仅输出列表后返回
+3. 逐个执行删除流程（同 3.1.2），每个都独立验证
+4. 汇总报告：成功数 / 失败数 / 跳过数
+
+##### Workspace 清理
+
+`/tenant delete` 默认**不删除** workspace 目录（保留聊天记录和 session-memory）。
+
+```
+/tenant purge <tenantId>
+```
+
+完全清除：删除 agent + binding + 配额 + usage + profile + workspace 目录。
+**不可恢复**，执行前要求 Owner 二次确认（输入 tenantId 确认）。
 
 #### 3.1.3 列出租户
 
@@ -338,7 +402,48 @@ api.on("before_reset", (event, ctx) => {
 
 ---
 
-## 5. 技术约束
+## 5. openclaw.json 编辑安全
+
+`openclaw.json` 是 gateway 的核心配置文件，写坏可能导致 gateway 无法启动。所有配置修改必须遵循以下流程：
+
+### 5.1 写入前验证（业务层）
+
+`writeConfigFile` 内部有 Zod schema 校验（格式层），但插件需额外做业务层验证：
+
+| 验证项 | 检查内容 | 失败行为 |
+|--------|---------|----------|
+| Agent ID 唯一 | `agents.list` 中无重复 ID | 返回错误，不写入 |
+| 保留 ID | 不使用 `main`/`system`/`cron`/`heartbeat`/`probe` | 返回错误 |
+| ID 格式 | 匹配 `/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/` | 返回错误 |
+| Model 引用 | `provider` 在 `models.providers` 中存在，`modelId` 在该 provider 的 models 列表中 | 返回错误 |
+| Binding 冲突 | 同一 channel+account+peer 不重复绑定 | 返回错误 |
+| 租户上限 | 不超过 20 个 | 返回错误 |
+| 配置完整性 | `agents`/`agents.list`/`agents.bindings` 结构存在 | 自动初始化 |
+
+### 5.2 写入后验证
+
+每次 `writeConfigFile` 成功后立即执行：
+
+1. `loadConfig()` 重新加载配置
+2. 确认目标 agent 出现/消失在 `agents.list` 中
+3. 确认目标 binding 出现/消失在 `agents.bindings` 中
+4. 验证不通过则记录警告日志（不回滚，因为 Zod 已通过）
+
+### 5.3 错误恢复
+
+`writeConfigFile` 内置安全机制：
+- 写入前自动创建 `.bak` 备份（最多保留 5 个）
+- 原子写入（先写 `.tmp` 再 `rename`）
+- Zod 校验不通过直接 `throw`，不写入
+
+插件层额外保证：
+- 所有验证失败在 `writeConfigFile` 调用**之前**返回错误
+- 捕获 `writeConfigFile` 的异常并返回友好错误信息
+- 错误信息中包含 `.bak` 路径提示，方便手动恢复
+
+---
+
+## 6. 技术约束
 
 - OpenClaw 当前**不支持配置热重载**，`/tenant create` / `/tenant delete` 需重启 gateway 生效
 - Plugin Hook `message_sending` / `message_received` 中无 `agentId`，需从 `sessionKey` 解析（格式：`agent:{agentId}:...`）
@@ -346,6 +451,7 @@ api.on("before_reset", (event, ctx) => {
 - ~~`before_reset` hook 是否能阻止 bundled session-memory hook 触发~~ → **已验证：不能**。改用独立 workspace 方案
 - `writeConfigFile` API 支持增量 merge patch（RFC 7386），可安全用于 `/tenant create`
 - 默认 `maxConcurrent = 1`（全局串行），多租户需调大
+- `agents.list` 在 merge patch 中是全量替换（非元素级），但 `/tenant create` 不会并发，安全
 
 ---
 
