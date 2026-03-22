@@ -13,6 +13,7 @@ import {
   isOwner,
   loadTenantsSync,
 } from "../store/tenants-config.js";
+import { appendNotification } from "../store/notifications.js";
 import { log } from "../utils/logger.js";
 
 const BLOCKED_TOOLS = new Set(["exec", "write", "edit", "session_status"]);
@@ -55,7 +56,7 @@ function buildSystemPrompt(agentId, tenantConfig) {
 // llm_output hook — Token/Calls counting
 // ═══════════════════════════════════════════════════
 
-export function onLlmOutput(db) {
+export function onLlmOutput(db, dataDir) {
   return (event, ctx) => {
     const agentId = ctx.agentId;
     if (!agentId || isOwner(agentId)) return;
@@ -92,7 +93,11 @@ export function onLlmOutput(db) {
     ) {
       log.info(`Agent ${agentId}: exceeded token limit (${usage.tokens}/${quota.maxTokens})`);
       recordQuotaEvent(db, agentId, "exceeded", `tokens=${usage.tokens}/${quota.maxTokens}`);
-      // M5 will add notification queue write here
+      appendNotification(dataDir, {
+        agentId,
+        type: "exceeded",
+        message: `Token 额度用尽（${usage.tokens}/${quota.maxTokens}）`,
+      });
     }
   };
 }
@@ -161,7 +166,7 @@ export function onBeforeToolCall(db) {
 // before_prompt_build hook — Warning injection + system prompt
 // ═══════════════════════════════════════════════════
 
-export function onBeforePromptBuild(db) {
+export function onBeforePromptBuild(db, dataDir) {
   return (event, ctx) => {
     const agentId = ctx.agentId;
     if (!agentId) return;

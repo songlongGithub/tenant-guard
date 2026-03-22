@@ -1,6 +1,7 @@
 import { initUsageDb } from "./store/usage-db.js";
 import { createTenantsConfigLoader } from "./store/tenants-config.js";
 import { onLlmOutput, onBeforeToolCall, onBeforePromptBuild } from "./hooks/quota.js";
+import { onOwnerNotify } from "./hooks/notify.js";
 import { log } from "./utils/logger.js";
 
 export default {
@@ -17,11 +18,12 @@ export default {
     log.info("Registering hooks...");
 
     // ── M2: Quota hooks ──────────────────────────
-    api.on("llm_output", onLlmOutput(db), { priority: -10 });
+    api.on("llm_output", onLlmOutput(db, dataDir), { priority: -10 });
     api.on("before_tool_call", onBeforeToolCall(db), { priority: -10 });
-    api.on("before_prompt_build", onBeforePromptBuild(db), { priority: -10 });
+    api.on("before_prompt_build", onBeforePromptBuild(db, dataDir), { priority: -10 });
 
-    // ── M5: Notification hooks (added later) ─────
+    // ── M5: Notification hook ─────────────────────
+    api.on("before_prompt_build", onOwnerNotify(dataDir), { priority: -10 });
 
     // ── M4: Profile hooks (added later) ──────────
 
