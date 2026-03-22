@@ -61,15 +61,19 @@ OpenClaw 是一个私有 AI Agent 网关，当前仅供 Owner 自用。随着需
 | `--team` | Slack 工作空间 ID | `T01ABCDEF` |
 | `--roles` | Discord 角色 IDs（逗号分隔）| `admin,vip` |
 | `--name` | 租户显示名称 | `"体验用户A"` |
+| `--model` | 租户使用的 LLM 模型（可选） | `bailian/qwen3.5-plus` |
+
+> **v1.1 新增**：Owner 可通过 `--model` 为租户指定独立模型，不指定则继承 `agents.defaults.model`。
 
 执行流程：
 1. 检查 `isAuthorizedSender`，否则拒绝
 2. 检查 `tenantId` 不重复
-3. 向 `openclaw.json` 的 `agents.list` 添加受限 agent 配置
+3. 向 `openclaw.json` 的 `agents.list` 添加受限 agent 配置（含独立 model 和 workspace）
 4. 向 `openclaw.json` 的 `agents.bindings` 添加路由规则
-5. 向 `tenants.json` 写入默认配额
-6. 初始化 `data/profiles/{tenantId}/` 目录
-7. 提示 Owner 重启 gateway 生效
+5. 自动调整 `agents.defaults.maxConcurrent`（租户数 + 2）
+6. 向 `tenants.json` 写入默认配额
+7. 初始化 `data/profiles/{tenantId}/` 目录
+8. 提示 Owner 重启 gateway 生效
 
 #### 3.1.2 删除租户
 

@@ -156,12 +156,37 @@ const resetIfNeeded = db.transaction((agentId, now) => { ... });
 
 ## 6. 租户 Agent 配置模板
 
-`/tenant create` 时自动写入 `openclaw.json`：
+`/tenant create` 命令格式：
+
+```
+/tenant create <id> --channel <channel> [--peer <peerId>] [--account <accountId>] [--model <provider/model>]
+```
+
+**Owner 可通过 `--model` 参数指定租户使用的模型**，不指定则继承 `agents.defaults.model`。
+
+示例：
+
+```bash
+# 使用便宜快速模型
+/tenant create demo-bot --channel openclaw-weixin --model bailian/qwen3.5-plus
+
+# 使用本地模型（零成本）
+/tenant create free-bot --channel telegram --peer 99999999 --model ollama/llama3.3
+
+# 不指定，继承默认模型
+/tenant create vip-bot --channel telegram --peer 88888888
+```
+
+写入 `openclaw.json` 的 agent 配置：
 
 ```jsonc
 // agents.list 新增项
 {
   "id": "{tenantId}",
+  "model": {                              // 仅当指定 --model 时
+    "primary": "{provider/model}",
+    "fallbacks": []                        // 可扩展
+  },
   "workspace": { "dir": "~/.openclaw/workspaces/{tenantId}" },
   "tools": {
     "profile": "minimal",
@@ -180,3 +205,66 @@ const resetIfNeeded = db.transaction((agentId, now) => { ... });
 
 // agents.defaults.maxConcurrent 自动调整为 租户数 + 2
 ```
+
+---
+
+## 7. 验证环境（Docker）
+
+使用已部署的 Docker OpenClaw 实例进行验证：
+
+| 实例 | 容器名 | 端口 | 配置目录（宿主机） |
+|------|---------|------|------------------|
+| 1 | openclaw_1 | 28789 | `/Users/long/Documents/projects/dockers/config/` |
+| 2 | openclaw_2 | 28790 | `/Users/long/Documents/projects/dockers/config_2/` |
+
+### 7.1 插件安装
+
+```bash
+# 方式 A：从 npm 安装（发布后）
+docker exec -it openclaw_1 openclaw plugins install tenant-guard@latest
+
+# 方式 B：本地开发挂载（开发期）
+# 修改 docker-compose.yml 添加 volume：
+#   - /Users/long/Documents/projects/tenant-guard:/home/node/.openclaw/extensions/tenant-guard
+# 然后在 openclaw.json 中添加 plugins 配置：
+#   "plugins": { "allow": ["tenant-guard"], "entries": { "tenant-guard": { "enabled": true } } }
+docker restart openclaw_1
+```
+
+### 7.2 验证流程
+
+```bash
+# 1. 安装插件并重启
+docker restart openclaw_1
+
+# 2. 查看插件是否加载
+docker exec openclaw_1 openclaw plugins list
+
+# 3. 通过 Control UI 测试 /tenant 命令
+# 访问 http://127.0.0.1:28789/#token=60451f988b545bbe5fab48e67027b17a3284bda8198dc590
+# 发送: /tenant create test-bot --channel openclaw-weixin --model bailian/qwen3.5-plus
+
+# 4. 检查配置是否更新
+cat /Users/long/Documents/projects/dockers/config/openclaw.json | grep test-bot
+
+# 5. 重启生效
+docker restart openclaw_1
+
+# 6. 查看日志确认租户 agent 加载
+docker logs openclaw_1 2>&1 | tail -50
+
+# 7. 从微信发消息测试租户配额拦截
+# （设置极低 maxTokens，观察第 2 条消息是否被拦截）
+```
+
+### 7.3 当前环境可用模型
+
+基于 Docker 实例 1 的 `openclaw.json`，租户可使用的模型：
+
+| 模型 | Provider | 建议用途 |
+|------|----------|----------|
+| `bailian/kimi-k2.5` | 百炼 DashScope | Owner / VIP 租户 |
+| `bailian/qwen3.5-plus` | 百炼 DashScope | **推荐租户默认** |
+| `bailian/glm-5` | 百炼 DashScope | 备选 |
+| `minimax/MiniMax-M2.7-highspeed` | MiniMax | 高速体验 |
+| `bailian/qwen3-coder-plus` | 百炼 DashScope | 代码场景 |
