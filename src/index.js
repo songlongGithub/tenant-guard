@@ -2,6 +2,7 @@ import { initUsageDb } from "./store/usage-db.js";
 import { createTenantsConfigLoader } from "./store/tenants-config.js";
 import { onLlmOutput, onBeforeToolCall, onBeforePromptBuild } from "./hooks/quota.js";
 import { onOwnerNotify } from "./hooks/notify.js";
+import { createTenantCommandHandler } from "./commands/tenant.js";
 import { log } from "./utils/logger.js";
 
 export default {
@@ -27,7 +28,14 @@ export default {
 
     // ── M4: Profile hooks (added later) ──────────
 
-    // ── M3: Commands (added later) ───────────────
+    // ── M3: Tenant management command ────────────
+    api.registerCommand({
+      name: "tenant",
+      description: "多租户管理（create/delete/list/quota/config/owner/cleanup）",
+      acceptsArgs: true,
+      requireAuth: true,
+      handler: createTenantCommandHandler(api, db),
+    });
 
     log.info("✅ tenant-guard loaded successfully");
   },

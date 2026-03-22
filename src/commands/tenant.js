@@ -1,0 +1,405 @@
+import {
+  loadTenantsSync,
+  getTenantConfig,
+  isOwner,
+  writeTenantsConfig,
+  isExpired,
+} from "../store/tenants-config.js";
+import { getUsage, ensureUsageRow, deleteUsage, recordQuotaEvent } from "../store/usage-db.js";
+import { log } from "../utils/logger.js";
+
+// ── Constants ─────────────────────────────────────
+const TENANT_ID_REGEX = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
+const RESERVED_IDS = new Set(["main", "system", "cron", "heartbeat", "probe"]);
+const MAX_TENANTS = 20;
+
+// ── Args parser ───────────────────────────────────
+function parseArgs(argsStr) {
+  const result = { _: [] };
+  const tokens = argsStr.trim().split(/\s+/);
+  let i = 0;
+  while (i < tokens.length) {
+    if (tokens[i].startsWith("--")) {
+      const key = tokens[i].slice(2);
+      // Check if next token is a value (not another flag)
+      if (i + 1 < tokens.length && !tokens[i + 1].startsWith("--")) {
+        result[key] = tokens[i + 1];
+        i += 2;
+      } else {
+        result[key] = true;
+        i += 1;
+      }
+    } else {
+      result._.push(tokens[i]);
+      i += 1;
+    }
+  }
+  return result;
+}
+
+// ── Validation ────────────────────────────────────
+function validateBeforeCreate(config, tenantId, options) {
+  const errors = [];
+
+  if (!TENANT_ID_REGEX.test(tenantId)) {
+    errors.push(`ID "${tenantId}" 格式无效（仅小写字母/数字/连字符，3-32 字符）`);
+  }
+  if (RESERVED_IDS.has(tenantId)) {
+    errors.push(`"${tenantId}" 是保留 ID`);
+  }
+  const existingIds = new Set(config.agents?.list?.map(a => a.id) || []);
+  if (existingIds.has(tenantId)) {
+    errors.push(`Agent ID "${tenantId}" 已存在`);
+  }
+  const tenantCount = (config.agents?.list || []).filter(a => a.id !== "main").length;
+  if (tenantCount >= MAX_TENANTS) {
+    errors.push(`已达租户上限 ${MAX_TENANTS}`);
+  }
+  if (options.model) {
+    const slash = options.model.indexOf("/");
+    if (slash === -1) {
+      errors.push(`Model 格式无效，需 "provider/modelId"`);
+    }
+    // Full model validation requires openclaw config, done at create time
+  }
+
+  return errors;
+}
+
+// ── Command: create ───────────────────────────────
+async function handleCreate(api, db, args) {
+  const tenantId = args._[0];
+  if (!tenantId) return { text: "❌ 用法: /tenant create <id> --channel <channel> [--model <m>] [--tools <list>] ..." };
+  if (!args.channel) return { text: "❌ 必须指定 --channel" };
+
+  const config = api.runtime.config.loadConfig();
+  const errors = validateBeforeCreate(config, tenantId, args);
+  if (errors.length > 0) {
+    return { text: `❌ 创建失败:\n${errors.map(e => `  • ${e}`).join("\n")}` };
+  }
+
+  // Build new openclaw config
+  const newConfig = structuredClone(config);
+  newConfig.agents ??= {};
+  newConfig.agents.list ??= [];
+  newConfig.agents.bindings ??= [];
+
+  const agentEntry = {
+    id: tenantId,
+    workspace: { dir: `~/.openclaw/workspaces/${tenantId}` },
+    tools: {
+      profile: "minimal",
+      allow: args.tools
+        ? args.tools.split(",").map(s => s.trim())
+        : ["read", "web_search", "image", "memory_search", "memory_get"],
+      deny: ["exec", "write", "edit", "session_status"],
+    },
+  };
+  if (args.model) {
+    agentEntry.model = { primary: args.model, fallbacks: [] };
+  }
+  newConfig.agents.list.push(agentEntry);
+
+  const binding = {
+    agentId: tenantId,
+    channel: args.channel,
+  };
+  if (args.account) binding.accountId = args.account;
+  if (args.peer) binding.match = { "peer.id": args.peer };
+  if (args["peer-kind"]) binding.match = { ...binding.match, "peer.kind": args["peer-kind"] };
+  newConfig.agents.bindings.push(binding);
+
+  // Adjust maxConcurrent
+  const tenantCount = newConfig.agents.list.filter(a => a.id !== "main").length;
+  const recommended = tenantCount + 2;
+  newConfig.agents.defaults ??= {};
+  if ((newConfig.agents.defaults.maxConcurrent ?? 1) < recommended) {
+    newConfig.agents.defaults.maxConcurrent = recommended;
+  }
+
+  // Write openclaw.json
+  try {
+    await api.runtime.config.writeConfigFile(newConfig);
+  } catch (err) {
+    return { text: `❌ 配置写入失败: ${err.message}\n.bak 备份已自动创建` };
+  }
+
+  // Post-write verification
+  const reloaded = api.runtime.config.loadConfig();
+  const found = reloaded.agents?.list?.some(a => a.id === tenantId);
+  if (!found) {
+    log.warn(`writeConfigFile succeeded but agent "${tenantId}" not found in reloaded config`);
+  }
+
+  // Update tenants.json
+  const tenantsConfig = loadTenantsSync();
+  tenantsConfig.tenants ??= {};
+  tenantsConfig.tenants[tenantId] = {
+    label: args.name || tenantId,
+    quota: {
+      maxTokens: args.tokens ? parseInt(args.tokens) : (tenantsConfig.defaults?.quota?.maxTokens || 100000),
+      maxCalls: args.calls ? parseInt(args.calls) : (tenantsConfig.defaults?.quota?.maxCalls || 50),
+      expiresAt: args.expires || null,
+      resetInterval: args["reset-interval"] || "daily",
+    },
+    ...(args.tools && { tools: { allow: args.tools.split(",").map(s => s.trim()), deny: ["exec", "write", "edit"] } }),
+    ...(args.language && { language: args.language }),
+    ...(args["over-limit"] && { overLimit: { action: args["over-limit"], downgradeModel: args["downgrade-model"] || null } }),
+    ...(args["system-prompt"] && { systemPrompt: args["system-prompt"] }),
+  };
+  writeTenantsConfig(tenantsConfig);
+
+  // Initialize SQLite row
+  ensureUsageRow(db, tenantId);
+  recordQuotaEvent(db, tenantId, "created", `channel=${args.channel}`);
+
+  const parts = [`✅ 租户 ${tenantId} 已创建`];
+  if (args.model) parts.push(`📦 模型: ${args.model}`);
+  parts.push(`⚠️ 需要重启 gateway 生效`);
+  return { text: parts.join("\n") };
+}
+
+// ── Command: delete ───────────────────────────────
+async function handleDelete(api, db, tenantId) {
+  if (!tenantId) return { text: "❌ 用法: /tenant delete <id>" };
+  if (tenantId === "main") return { text: "❌ 不能删除主 agent" };
+
+  const config = api.runtime.config.loadConfig();
+  const newConfig = structuredClone(config);
+  const index = newConfig.agents?.list?.findIndex(a => a.id === tenantId);
+  if (index === -1 || index === undefined) {
+    return { text: `❌ 租户 ${tenantId} 不存在于 openclaw.json` };
+  }
+
+  newConfig.agents.list.splice(index, 1);
+  newConfig.agents.bindings = (newConfig.agents.bindings || []).filter(b => b.agentId !== tenantId);
+
+  try {
+    await api.runtime.config.writeConfigFile(newConfig);
+  } catch (err) {
+    return { text: `❌ 配置写入失败: ${err.message}` };
+  }
+
+  // Clean tenants.json
+  const tenantsConfig = loadTenantsSync();
+  if (tenantsConfig.tenants?.[tenantId]) {
+    delete tenantsConfig.tenants[tenantId];
+    writeTenantsConfig(tenantsConfig);
+  }
+
+  // Clean SQLite
+  deleteUsage(db, tenantId);
+  recordQuotaEvent(db, tenantId, "deleted", null);
+
+  return { text: `✅ 租户 ${tenantId} 已删除\n⚠️ 需要重启 gateway 生效` };
+}
+
+// ── Command: list ─────────────────────────────────
+function handleList(db) {
+  const tenantsConfig = loadTenantsSync();
+  const tenants = tenantsConfig.tenants || {};
+  const ids = Object.keys(tenants);
+
+  if (ids.length === 0) return { text: "暂无租户。使用 /tenant create 创建。" };
+
+  const lines = ids.map(id => {
+    const t = getTenantConfig(id);
+    const usage = getUsage(db, id) || { tokens: 0, calls: 0 };
+    const quota = t?.quota || {};
+
+    let status = "✅ 活跃";
+    if (isExpired(quota)) status = "⏰ 已过期";
+    else if (quota.maxTokens && usage.tokens >= quota.maxTokens) status = "🚫 已超限";
+    else if (quota.maxTokens && usage.tokens / quota.maxTokens >= 0.8) status = "⚠️ 即将超限";
+
+    return `${id.padEnd(16)} tokens: ${usage.tokens}/${quota.maxTokens || "∞"}  calls: ${usage.calls}/${quota.maxCalls || "∞"}  ${status}`;
+  });
+
+  return { text: `租户列表（共 ${ids.length} 个）\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${lines.join("\n")}` };
+}
+
+// ── Command: quota ────────────────────────────────
+function handleQuota(db, args) {
+  const tenantId = args._[0];
+  if (!tenantId) return { text: "❌ 用法: /tenant quota <id> [--tokens <n>] [--calls <n>] [--expires <ISO>] [--reset]" };
+
+  const tenantsConfig = loadTenantsSync();
+  if (!tenantsConfig.tenants?.[tenantId]) return { text: `❌ 租户 ${tenantId} 不存在` };
+
+  const tenant = tenantsConfig.tenants[tenantId];
+  let changed = false;
+
+  if (args.tokens) { tenant.quota.maxTokens = parseInt(args.tokens); changed = true; }
+  if (args.calls) { tenant.quota.maxCalls = parseInt(args.calls); changed = true; }
+  if (args.expires) { tenant.quota.expiresAt = args.expires; changed = true; }
+  if (args["reset-interval"]) { tenant.quota.resetInterval = args["reset-interval"]; changed = true; }
+
+  if (args.reset === true) {
+    const db2 = db;
+    db2.prepare("UPDATE usage SET tokens = 0, calls = 0, notified = 0, last_reset = ? WHERE agent_id = ?")
+      .run(Date.now(), tenantId);
+    recordQuotaEvent(db, tenantId, "reset", "manual");
+    if (!changed) return { text: `✅ 租户 ${tenantId} 用量已重置` };
+  }
+
+  if (changed) {
+    writeTenantsConfig(tenantsConfig);
+    return { text: `✅ 租户 ${tenantId} 配额已更新` };
+  }
+
+  // Display current quota
+  const usage = getUsage(db, tenantId) || { tokens: 0, calls: 0 };
+  const q = tenant.quota;
+  return {
+    text: [
+      `📊 ${tenantId} 配额信息：`,
+      `  Tokens: ${usage.tokens} / ${q.maxTokens || "∞"}`,
+      `  Calls:  ${usage.calls} / ${q.maxCalls || "∞"}`,
+      `  重置:   ${q.resetInterval || "none"}`,
+      `  过期:   ${q.expiresAt || "无限期"}`,
+    ].join("\n"),
+  };
+}
+
+// ── Command: config ───────────────────────────────
+function handleConfig(args) {
+  const tenantId = args._[0];
+  if (!tenantId) return { text: "❌ 用法: /tenant config <id> [--model <m>] [--tools <list>] [--language <lang>] ..." };
+
+  const tenantsConfig = loadTenantsSync();
+  if (!tenantsConfig.tenants?.[tenantId]) return { text: `❌ 租户 ${tenantId} 不存在` };
+
+  const tenant = tenantsConfig.tenants[tenantId];
+  let changed = false;
+
+  if (args.model) { tenant.model = args.model; changed = true; }
+  if (args.tools) {
+    tenant.tools = {
+      allow: args.tools.split(",").map(s => s.trim()),
+      deny: tenant.tools?.deny || ["exec", "write", "edit"],
+    };
+    changed = true;
+  }
+  if (args.language) { tenant.language = args.language; changed = true; }
+  if (args["over-limit"]) {
+    tenant.overLimit = {
+      action: args["over-limit"],
+      downgradeModel: args["downgrade-model"] || tenant.overLimit?.downgradeModel || null,
+    };
+    changed = true;
+  }
+  if (args["system-prompt"]) { tenant.systemPrompt = args["system-prompt"]; changed = true; }
+  if (args["memory-read"]) {
+    tenant.memory = { ...tenant.memory, globalRead: args["memory-read"] === "on" };
+    changed = true;
+  }
+
+  if (!changed) return { text: `❌ 未指定要修改的配置项` };
+
+  writeTenantsConfig(tenantsConfig);
+  return { text: `✅ 租户 ${tenantId} 配置已更新（无需重启）` };
+}
+
+// ── Command: owner ────────────────────────────────
+function handleOwner(args) {
+  const subCmd = args._[0];
+  const agentId = args._[1];
+  const tenantsConfig = loadTenantsSync();
+  tenantsConfig.ownerAgents ??= ["main"];
+
+  if (subCmd === "list" || !subCmd) {
+    return { text: `🔑 管理员 bot 列表：\n${tenantsConfig.ownerAgents.map(a => `  • ${a}`).join("\n")}` };
+  }
+
+  if (subCmd === "add") {
+    if (!agentId) return { text: "❌ 用法: /tenant owner add <agentId>" };
+    if (tenantsConfig.ownerAgents.includes(agentId)) {
+      return { text: `${agentId} 已经是管理员` };
+    }
+    tenantsConfig.ownerAgents.push(agentId);
+    writeTenantsConfig(tenantsConfig);
+    return { text: `✅ ${agentId} 已添加为管理员` };
+  }
+
+  if (subCmd === "remove") {
+    if (!agentId) return { text: "❌ 用法: /tenant owner remove <agentId>" };
+    if (agentId === "main") return { text: "❌ 不能移除 main" };
+    tenantsConfig.ownerAgents = tenantsConfig.ownerAgents.filter(a => a !== agentId);
+    writeTenantsConfig(tenantsConfig);
+    return { text: `✅ ${agentId} 已从管理员列表移除` };
+  }
+
+  return { text: "❌ 用法: /tenant owner [list|add|remove] <agentId>" };
+}
+
+// ── Command: cleanup ──────────────────────────────
+async function handleCleanup(api, db, args) {
+  const tenantsConfig = loadTenantsSync();
+  const tenants = tenantsConfig.tenants || {};
+  const now = Date.now();
+  const candidates = [];
+
+  for (const [id, tenant] of Object.entries(tenants)) {
+    if (args.expired && tenant.quota?.expiresAt && new Date(tenant.quota.expiresAt).getTime() < now) {
+      candidates.push({ id, reason: `过期于 ${tenant.quota.expiresAt}` });
+    }
+    if (args["inactive-days"]) {
+      const profile = db.prepare("SELECT last_seen FROM profiles WHERE agent_id = ?").get(id);
+      if (profile?.last_seen) {
+        const daysSince = (now - new Date(profile.last_seen).getTime()) / 86400000;
+        if (daysSince > parseInt(args["inactive-days"])) {
+          candidates.push({ id, reason: `不活跃 ${Math.floor(daysSince)} 天` });
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0) return { text: "✅ 没有需要清理的租户" };
+
+  if (args["dry-run"] === true) {
+    const list = candidates.map(c => `  • ${c.id}: ${c.reason}`).join("\n");
+    return { text: `🔍 预览（不执行删除）:\n${list}` };
+  }
+
+  let success = 0, failed = 0;
+  for (const c of candidates) {
+    const result = await handleDelete(api, db, c.id);
+    if (result.text.startsWith("✅")) success++; else failed++;
+  }
+  return { text: `🧹 清理完成: ${success} 成功, ${failed} 失败` };
+}
+
+// ── Main handler ──────────────────────────────────
+export function createTenantCommandHandler(api, db) {
+  return async (ctx) => {
+    const argsStr = ctx.args || "";
+    const tokens = argsStr.trim().split(/\s+/);
+    const subCmd = tokens[0] || "help";
+    const restArgs = parseArgs(tokens.slice(1).join(" "));
+
+    switch (subCmd) {
+      case "create":  return handleCreate(api, db, restArgs);
+      case "delete":  return handleDelete(api, db, restArgs._[0]);
+      case "list":    return handleList(db);
+      case "quota":   return handleQuota(db, restArgs);
+      case "config":  return handleConfig(restArgs);
+      case "owner":   return handleOwner(restArgs);
+      case "cleanup": return handleCleanup(api, db, restArgs);
+      case "help":
+      default:
+        return {
+          text: [
+            "📋 tenant-guard 管理命令",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "/tenant create <id> --channel <ch> [--model <m>] [--tools <list>] [--language <lang>]",
+            "/tenant delete <id>",
+            "/tenant list",
+            "/tenant quota <id> [--tokens <n>] [--calls <n>] [--expires <ISO>] [--reset]",
+            "/tenant config <id> [--model <m>] [--tools <list>] [--language <lang>]",
+            "/tenant owner [list|add|remove] <agentId>",
+            "/tenant cleanup [--expired] [--inactive-days <N>] [--dry-run]",
+          ].join("\n"),
+        };
+    }
+  };
+}
