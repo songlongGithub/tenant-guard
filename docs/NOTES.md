@@ -1,6 +1,7 @@
 # 注意事项与已知坑
 
 > 本文档记录实现过程中必须了解的约束、反直觉行为和历史踩坑。
+> v1.1 更新：标注已通过源码验证解决的问题。
 
 ---
 
@@ -40,28 +41,17 @@ const tokens = (event.usage?.input ?? 0) + (event.usage?.output ?? 0);
 // 如果 tokens === 0 且 provider 不是已知不返回 usage 的，记一次警告
 ```
 
-### 4. `before_reset` hook 是否能阻止 bundled session-memory
+### 4. `before_reset` hook 无法阻止 bundled session-memory ✅ 已解决
 
-`before_reset` 是 OpenClaw 内置 hook，bundled session-memory 也监听同一事件（`command:new` / `command:reset`）。
+**源码验证结论**：`before_reset` 是 void hook，在 fire-and-forget IIFE 中执行，session-memory 是 internal hook 在 plugin hook 之前就完成了写入。
 
-**不确定插件的 `before_reset` handler 是否能阻止 bundled hook 执行。**
+**解决方案**：给租户 agent 配置独立 workspace 目录，session-memory 写入租户自己的 `workspace/memory/`。
 
-测试方法见 TESTING.md §2.3。如果无法阻止，备选方案是：
-- 给租户 agent 配置独立 workspace 目录（与 main 不同），session-memory 写入租户自己的 memory 目录，不污染全局记忆。
+### 5. `session_end` 中无法直接读取 session 文件内容 ✅ 已解决
 
-### 5. `session_end` 中无法直接读取 session 文件内容
+**源码验证结论**：不再使用 `session_end`。改用 `before_reset` hook，其 event 直接提供 `messages` 数组（OpenClaw 在调用 hook 前已读取并解析 session 文件）。
 
-`session_end` 的 event 只有 `{ sessionId, sessionKey, messageCount, durationMs }`，没有 sessionFile 路径。
-
-需要自行拼接路径：
-
-```javascript
-// 路径规则（基于 OpenClaw 源码观察）
-const agentDir = path.join(os.homedir(), ".openclaw", "agents", agentId);
-const sessionFile = path.join(agentDir, "sessions", `${event.sessionId}.jsonl`);
-```
-
-路径格式可能随 OpenClaw 版本变化，需要在 `session_start` hook 时缓存 sessionFile 路径（从 sessions.json 读取），以 sessionId 为 key 备用。
+**无需手动拼接 sessionFile 路径。**
 
 ---
 
@@ -151,23 +141,39 @@ db.pragma("synchronous = NORMAL");
 
 但如果 `session_end` hook 的 ctx 携带的是租户的 agentId，需要确认 LLM 调用使用的 profile 是全局默认而非租户绑定的。
 
-### 13. `generateSlugViaLLM` 不在 Plugin SDK 公开 API 中
+### 13. `generateSlugViaLLM` 不在 Plugin SDK 公开 API 中 ✅ 已解决
 
-需要动态 import，路径在 `openclaw/dist/bundled/session-memory/handler.js`。该路径在 OpenClaw 版本更新后可能变化。
+**v1 方案**：不使用 `generateSlugViaLLM`，改用简单关键词提取（TF 频率统计）。
+**v2 方案**：可通过 `runtime.subagent.run()` 调用 LLM 生成 topic。
 
-保险做法：提供一个简单的关键词提取 fallback，`generateSlugViaLLM` 失败时使用关键词拼接：
+---
 
-```javascript
-async function generateTopicSlug(messages) {
-  try {
-    return await generateSlugViaLLM(messages);
-  } catch {
-    // fallback: 取第一条用户消息的前 20 字
-    const first = messages.find(m => m.role === "user");
-    return first?.content?.slice(0, 20).replace(/\s+/g, "-") ?? "unknown";
-  }
-}
-```
+## 六、新增发现（源码验证）
+
+### 15. `writeConfigFile` 支持增量 merge patch
+
+`writeConfigFile(newConfig)` 内部使用 RFC 7386 Merge Patch：
+- 先读取当前文件快照
+- 计算 diff（只提取变化字段）
+- 应用到原始文件（保留注释、环境变量引用）
+- 自动备份 `.bak`
+- 审计日志
+
+**注意**：数组字段（如 `agents.list`）是全量替换，非元素级 merge。但 `/tenant create` 场景不会并发，可安全使用。
+
+### 16. Command Lane 并发模型
+
+OpenClaw 使用 Command Lane 队列管理并发：
+- 默认 `maxConcurrent = 1`，所有 agent run 串行执行
+- 不同 session 有独立 lane，但受全局并发限制
+- 多租户场景需调大 `agents.defaults.maxConcurrent`（建议 = 租户数 + 2）
+
+### 17. 并发下配额安全要求
+
+当 `maxConcurrent > 1` 时，必须遵循：
+- **原子 SQL**：用 `SET tokens = tokens + ?`，不用 SELECT-then-UPDATE
+- **CAS 防重复通知**：`UPDATE ... WHERE notified = 0`
+- **事务保证重置原子性**：`db.transaction()` 包裹重置检查+执行
 
 ---
 
@@ -186,3 +192,4 @@ async function generateTopicSlug(messages) {
 | 日期 | 变更 |
 |------|------|
 | 2026-03-22 | 初始版本，记录设计阶段发现的约束 |
+| 2026-03-22 | v1.1：源码验证 #4/#5/#13，标注已解决；新增 #15/#16/#17 |
