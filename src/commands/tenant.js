@@ -94,11 +94,10 @@ async function handleCreate(api, db, args) {
   }
   newConfig.agents ??= {};
   newConfig.agents.list ??= [];
-  newConfig.agents.bindings ??= [];
+  newConfig.bindings ??= []; // 顶层 bindings，非 agents.bindings
 
   const agentEntry = {
     id: tenantId,
-    workspace: { dir: `~/.openclaw/workspaces/${tenantId}` },
     tools: {
       profile: "minimal",
       allow: args.tools
@@ -119,7 +118,7 @@ async function handleCreate(api, db, args) {
   if (args.account) binding.accountId = args.account;
   if (args.peer) binding.match = { "peer.id": args.peer };
   if (args["peer-kind"]) binding.match = { ...binding.match, "peer.kind": args["peer-kind"] };
-  newConfig.agents.bindings.push(binding);
+  newConfig.bindings.push(binding);
 
   // Adjust maxConcurrent
   const tenantCount = newConfig.agents.list.filter(a => a.id !== "main").length;
@@ -195,18 +194,22 @@ async function handleDelete(api, db, tenantId) {
     newConfig.agents.list.splice(agentIndex, 1);
   }
 
-  // Find channels bound to this tenant before removing bindings
-  const removedChannels = [];
-  for (const b of (newConfig.agents.bindings || [])) {
-    if (b.agentId === tenantId && b.channel && newConfig.channels?.[b.channel]) {
-      removedChannels.push(b.channel);
-    }
-  }
-  newConfig.agents.bindings = (newConfig.agents.bindings || []).filter(b => b.agentId !== tenantId);
+  // 从顶层 bindings 找出该租户绑定的 channel
+  const tenantChannels = (newConfig.bindings || [])
+    .filter(b => b.agentId === tenantId && b.channel)
+    .map(b => b.channel);
 
-  // Remove channel configs that belong to this tenant
-  for (const ch of removedChannels) {
-    delete newConfig.channels[ch];
+  // 移除该租户的所有 bindings
+  newConfig.bindings = (newConfig.bindings || []).filter(b => b.agentId !== tenantId);
+
+  // 只删除没有被其他 binding 引用的 channel 配置，避免误删共享渠道
+  const removedChannels = [];
+  const remainingChannels = new Set((newConfig.bindings || []).map(b => b.channel).filter(Boolean));
+  for (const ch of tenantChannels) {
+    if (!remainingChannels.has(ch) && newConfig.channels?.[ch]) {
+      delete newConfig.channels[ch];
+      removedChannels.push(ch);
+    }
   }
 
   try {
