@@ -10,17 +10,36 @@
  * 3. On confirmed → return userId (peer ID) for tenant registration
  */
 
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { log } from "../utils/logger.js";
 
 const DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com";
 const DEFAULT_BOT_TYPE = "3";
 const POLL_TIMEOUT_MS = 35_000; // client-side timeout for long-poll
 const MAX_QR_REFRESH = 3;
+const QR_TMP_DIR = "/tmp/openclaw/tenant-guard/qr";
 
 /**
- * Fetch a new QR code from the WeChat API.
+ * Generate a QR code PNG from a URL and save to a temp file.
+ * Returns the local file path (e.g. /tmp/openclaw/tenant-guard/qr/qr-1234.png).
+ * @param {string} content - The URL/string to encode in the QR code
+ * @returns {Promise<string>} local file path
+ */
+async function generateQRCodeFile(content) {
+  const { default: QRCode } = await import("qrcode");
+  await mkdir(QR_TMP_DIR, { recursive: true });
+  const filePath = join(QR_TMP_DIR, `qr-${Date.now()}.png`);
+  await QRCode.toFile(filePath, content, { type: "png", width: 300, margin: 2 });
+  log.info(`QR code PNG generated: ${filePath}`);
+  return filePath;
+}
+
+/**
+ * Fetch a new QR code from the WeChat API and generate a local PNG image.
  * @param {string} baseUrl - API base URL
  * @returns {Promise<{qrcode: string, qrcodeImgUrl: string}>}
+ *   qrcodeImgUrl is now a local file path (e.g. /tmp/.../qr-xxx.png)
  */
 export async function fetchQRCode(baseUrl = DEFAULT_BASE_URL) {
   const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
@@ -34,9 +53,12 @@ export async function fetchQRCode(baseUrl = DEFAULT_BASE_URL) {
   }
 
   const data = await response.json();
+  // data.qrcode_img_content is an HTML landing page, not a direct image.
+  // Generate a PNG locally from the scan URL so sendMedia can deliver it as an image.
+  const qrcodeImgUrl = await generateQRCodeFile(data.qrcode_img_content);
   return {
     qrcode: data.qrcode,
-    qrcodeImgUrl: data.qrcode_img_content,
+    qrcodeImgUrl,
   };
 }
 
