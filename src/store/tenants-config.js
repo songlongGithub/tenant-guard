@@ -24,8 +24,8 @@ export function createTenantsConfigLoader(dataDir) {
       defaults: {
         quota: { maxTokens: 100000, maxCalls: 50, expiresAt: null, resetInterval: "daily" },
         tools: {
-          allow: ["read", "web_search", "image", "memory_search", "memory_get"],
-          deny: ["exec", "write", "edit", "session_status"],
+          allow: ["read", "write", "web_search", "web_fetch", "memory_search", "memory_get"],
+          deny: ["exec", "session_status"],
         },
         memory: { globalRead: true, globalWrite: false },
         overLimit: { action: "reject", downgradeModel: null },
