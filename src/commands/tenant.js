@@ -169,7 +169,7 @@ async function handleCreate(api, db, args) {
   if (args.model) parts.push(`📦 模型: ${args.model}`);
   parts.push(`🔄 Gateway 正在重启以加载新配置...`);
   // 延迟退出，让响应先发回给用户；docker restart:always 会自动重启容器
-  setTimeout(() => { log.info("Restarting gateway after tenant create"); process.exit(0); }, 800);
+  setTimeout(() => { log.info("Restarting gateway after tenant create"); process.exit(0); }, 3000);
   return { text: parts.join("\n") };
 }
 
@@ -233,7 +233,7 @@ async function handleDelete(api, db, tenantId) {
   if (removedChannels.length > 0) parts.push(`🗑️ 渠道配置已清除: ${removedChannels.join(", ")}`);
   parts.push(`🔄 Gateway 正在重启以加载新配置...`);
   // 延迟退出，让响应先发回给用户；docker restart:always 会自动重启容器
-  setTimeout(() => { log.info("Restarting gateway after tenant delete"); process.exit(0); }, 800);
+  setTimeout(() => { log.info("Restarting gateway after tenant delete"); process.exit(0); }, 3000);
   return { text: parts.join("\n") };
 }
 
