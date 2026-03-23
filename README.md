@@ -1,111 +1,133 @@
 # tenant-guard
 
-OpenClaw 多租户授权与记忆隔离插件。
+> OpenClaw 多租户授权、配额、隔离与画像插件
 
-## 功能概述
+## 功能概览
 
-为 OpenClaw 提供完整的多租户能力，支持将 AI Agent 能力安全地开放给第三方 Bot 接入：
+| 能力 | 说明 |
+|------|------|
+| **配额管控** | Token/Calls 计数、超限拦截（reject/downgrade）、滑动窗口自动重置 |
+| **工具权限** | 可配置 allow/deny 列表，默认禁止 exec/write/edit |
+| **系统提示词** | 模板变量替换、首次欢迎、语言约束（zh/en/ja/auto） |
+| **Owner 通知** | JSONL 队列、超限/过期自动通知、drain 注入主对话 |
+| **多管理员** | ownerAgents 列表、/tenant owner add/remove，支持手机端管理 |
+| **租户管理** | /tenant 命令（create/delete/list/quota/config/owner/cleanup/profile） |
+| **租户画像** | before_reset 会话采集、关键词提取、profile 聚合统计 |
+| **超限降速** | 可配置 downgrade 模式，切换到更便宜的模型 |
 
-- **租户隔离**：每个租户 Bot 对应独立的 Agent，工具权限最小化（仅 `read` / `web_search` / `image`）
-- **记忆隔离**：全局记忆只读，租户会话记忆独立存储，不互相污染
-- **配额管理**：按 Token 用量、调用次数、到期时间三维度控制，24 小时滑动窗口自动重置
-- **超额提示**：租户侧三层提示（预警 / 拦截 / 兜底），Owner 侧通知队列下次对话时提醒
-- **管理命令**：Owner 专属 `/tenant` 命令，支持动态创建 / 删除 / 查看租户
-- **租户画像**：每次会话结束自动生成摘要，LLM 提取 topic，可追踪用户偏好优化模型
+## 安装
 
-## 支持的 Channel
-
-| Channel | 来源 | 典型匹配字段 |
-|---------|------|-------------|
-| telegram | 内置 | `peer.id`（用户 ID）|
-| whatsapp | 内置 | `peer.id`（E.164 手机号）|
-| discord | 内置 | `guildId` / `roles` / `peer.id` |
-| slack | 内置 | `teamId` / `peer.id` |
-| signal | 内置 | `peer.id`（E.164）|
-| imessage | 内置 | `peer.id`（handle）|
-| irc | 内置 | `peer.id`（频道名）|
-| googlechat | 内置 | `peer.id`（用户/空间 ID）|
-| line | 内置 | `peer.id` |
-| feishu | 插件 | `peer.id`（用户/群 ID）|
-| qqbot | 插件 | `accountId` / `peer.id` |
-| openclaw-weixin | 插件 | `peer.id`（微信 ID）|
-
-## 目录结构
-
-```
-tenant-guard/
-├── src/
-│   └── index.js           # 插件主入口
-├── data/
-│   ├── tenants.json       # 租户配额配置（热加载，Owner 直接编辑）
-│   ├── usage.sqlite       # 用量统计数据库
-│   ├── notifications.jsonl # Owner 通知队列
-│   └── profiles/          # 租户会话画像
-│       └── {tenantId}/
-│           ├── profile.json
-│           └── sessions-digest.jsonl
-├── docs/
-│   ├── SPEC.md            # 完整需求规格
-│   ├── NOTES.md           # 注意事项与已知坑
-│   └── TESTING.md         # 测试方法
-├── openclaw.plugin.json   # 插件元数据
-└── package.json
-```
-
-## 快速开始
-
-### 安装插件
+### Docker 环境（推荐）
 
 ```bash
-# 在 openclaw.json 中添加
+# 1. 打包插件
+cd tenant-guard
+tar -cf /tmp/plugin.tar --exclude=node_modules --exclude=.git \
+  src package.json openclaw.plugin.json
+
+# 2. 上传到容器
+docker cp /tmp/plugin.tar openclaw_1:/tmp/
+
+# 3. 容器内解压 + 安装依赖
+docker exec openclaw_1 sh -c "
+  mkdir -p /tmp/tenant-guard-src
+  cd /tmp/tenant-guard-src
+  tar xf /tmp/plugin.tar
+  npm install --production
+"
+
+# 4. OpenClaw CLI 安装
+docker exec openclaw_1 openclaw plugins install /tmp/tenant-guard-src
+
+# 5. 重启生效
+docker restart openclaw_1
+```
+
+### 验证安装
+
+```bash
+docker logs openclaw_1 --tail 20 | grep tenant-guard
+# 应看到：
+# [tenant-guard] SQLite initialized: /app/data/usage.sqlite
+# [tenant-guard] Registering hooks...
+# [tenant-guard] ✅ tenant-guard loaded successfully
+```
+
+## 配置
+
+### tenants.json（租户配额配置）
+
+```json
 {
-  "plugins": {
-    "allow": ["tenant-guard"],
-    "installs": {
-      "tenant-guard": {
-        "source": "path",
-        "sourcePath": "/path/to/tenant-guard"
-      }
-    }
-  }
+  "ownerAgents": ["main"],
+  "defaults": {
+    "quota": { "maxTokens": 100000, "maxCalls": 50, "resetInterval": "daily" },
+    "tools": { "allow": ["read", "web_search", "image"], "deny": ["exec", "write", "edit"] },
+    "language": "auto",
+    "overLimit": { "action": "reject" }
+  },
+  "systemPromptTemplate": "你是 {name}。\n{language_hint}\n额度：{maxTokens} tokens.",
+  "tenants": {}
 }
 ```
 
-### 创建第一个租户
+### openclaw.json 兼容性
 
-在 Owner 的主对话中：
+`package.json` 必须包含：
+```json
+{
+  "openclaw": { "extensions": ["./src/index.js"] }
+}
+```
+
+`openclaw.plugin.json` 必须包含：
+```json
+{
+  "configSchema": { "type": "object", "properties": {} }
+}
+```
+
+## 管理命令
 
 ```
-/tenant create my-bot --channel qqbot --account bot1
-/tenant quota my-bot --tokens 500000 --calls 200 --expires 2026-04-01
+/tenant create <id> --channel <ch> [--model <m>] [--tools <list>] [--language <lang>]
+/tenant delete <id>
+/tenant list
+/tenant quota <id> [--tokens <n>] [--calls <n>] [--expires <ISO>] [--reset]
+/tenant config <id> [--model <m>] [--tools <list>] [--language <lang>]
+/tenant owner [list|add|remove] <agentId>
+/tenant cleanup [--expired] [--inactive-days <N>] [--dry-run]
+/tenant profile <id>
 ```
 
-重启 gateway 后生效：
+## 自测
 
 ```bash
-openclaw gateway restart
+# 需要 node_modules（better-sqlite3）
+node test/self-test-m2.mjs  # 配额核心 (30 tests)
+node test/self-test-m3.mjs  # 管理命令 (25 tests)
+node test/self-test-m4.mjs  # 租户画像 (14 tests)
+node test/self-test-m5.mjs  # 通知队列 (15 tests)
 ```
 
-### 查看租户状态
+## 调试
 
+```bash
+# 启用详细日志
+TENANT_GUARD_DEBUG=1 openclaw gateway start
+
+# 查看用量数据
+sqlite3 usage.sqlite "SELECT * FROM usage"
+
+# 查看事件日志
+sqlite3 usage.sqlite "SELECT * FROM quota_events ORDER BY created_at DESC LIMIT 10"
 ```
-/tenant list
-/tenant usage my-bot
-/tenant profile my-bot
-```
-
-## 详细文档
-
-- [需求规格 SPEC.md](docs/SPEC.md)
-- [注意事项 NOTES.md](docs/NOTES.md)
-- [测试方法 TESTING.md](docs/TESTING.md)
 
 ## 技术栈
 
-- **运行环境**：Node.js ESM（`type: "module"`）
-- **数据库**：SQLite（`better-sqlite3`，同步 API）
-- **配置格式**：JSON（`tenants.json` 支持热加载）
-- **插件 API**：OpenClaw Plugin SDK v2
+- **运行时**：Node.js 18+、ESM
+- **数据库**：better-sqlite3（WAL 模式）
+- **依赖**：仅 better-sqlite3（零其他依赖）
 
 ## License
 

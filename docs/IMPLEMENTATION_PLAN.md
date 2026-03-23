@@ -1,8 +1,33 @@
 # tenant-guard 实施方案
 
-> 版本：v1.0
-> 日期：2026-03-22
+> 版本：v1.0 → **v1.0-final**
+> 日期：2026-03-22（初稿） → 2026-03-23（完成）
 > 基于 OpenClaw Plugin SDK v2 源码验证
+
+## 实施状态
+
+| 里程碑 | 状态 | 自测 | 提交 |
+|--------|------|------|------|
+| M2 配额执行核心 | ✅ 完成 | 30/30 | `4362646` |
+| M5 Owner 通知队列 | ✅ 完成 | 15/15 | `23bfc79` |
+| M3 管理命令 | ✅ 完成 | 25/25 | `d4e5220` |
+| M4 租户画像 | ✅ 完成 | 14/14 | `49304f7` |
+| M6 Docker 集成验证 | ✅ 完成 | — | `b91d145` |
+
+### Docker 验证结果
+
+- ✅ `openclaw plugins install` 安装成功
+- ✅ SQLite + 所有 hooks + /tenant command 注册正常
+- ✅ 重启后插件持久化加载正常
+
+### OpenClaw 兼容性修复
+
+| 发现的问题 | 修复方式 |
+|-----------|---------|
+| `package.json missing openclaw.extensions` | 添加 `openclaw.extensions: ["./src/index.js"]` |
+| `plugin manifest requires configSchema` | `openclaw.plugin.json` 添加 `configSchema` |
+| `async registration is ignored` | `register()` 改为同步 |
+
 
 ---
 
