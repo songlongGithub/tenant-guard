@@ -6,7 +6,10 @@ import {
   isExpired,
 } from "../store/tenants-config.js";
 import { getUsage, ensureUsageRow, deleteUsage, recordQuotaEvent } from "../store/usage-db.js";
+import { startInviteFlow } from "../weixin/qr-invite.js";
+import { appendNotification } from "../store/notifications.js";
 import { log } from "../utils/logger.js";
+
 
 // ── Constants ─────────────────────────────────────
 const TENANT_ID_REGEX = /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/;
@@ -390,6 +393,77 @@ function handleProfile(db, args) {
   };
 }
 
+// ── Command: invite ───────────────────────────────────
+async function handleInvite(db, dataDir, args) {
+  const label = args._[0] || "新用户";
+
+  const result = await startInviteFlow({
+    timeoutMs: 300_000,
+
+    onResult: (res) => {
+      if (res.success && res.userId) {
+        // Auto-register tenant in tenants.json
+        const peerKey = `peer:${res.userId}`;
+        const config = loadTenantsSync();
+        if (!config.tenants) config.tenants = {};
+
+        if (!config.tenants[peerKey]) {
+          config.tenants[peerKey] = {
+            label,
+            createdAt: new Date().toISOString(),
+            weixinUserId: res.userId,
+          };
+          writeTenantsConfig(config);
+          ensureUsageRow(db, peerKey);
+          recordQuotaEvent(db, peerKey, "created", `via invite, label=${label}`);
+          log.info(`Invite success: registered ${peerKey} as tenant "${label}"`);
+        }
+
+        // Notify owner
+        appendNotification(dataDir, {
+          agentId: peerKey,
+          type: "invite_success",
+          message: `✅ ${label} (微信用户) 已通过扫码成功注册为租户。`,
+        });
+      } else {
+        // Notify owner about failure
+        appendNotification(dataDir, {
+          agentId: "system",
+          type: "invite_failed",
+          message: `❌ 邀请 "${label}" 失败：${res.message}`,
+        });
+      }
+    },
+
+    onRefresh: (refreshData) => {
+      // Emit a notification when QR is refreshed
+      appendNotification(dataDir, {
+        agentId: "system",
+        type: "invite_qr_refresh",
+        message: `${refreshData.message}\n新二维码：${refreshData.qrcodeImgUrl}`,
+      });
+    },
+  });
+
+  if (result.error) {
+    return { text: `❌ ${result.error}` };
+  }
+
+  return {
+    text: [
+      `🔗 邀请 "${label}" 加入`,
+      "━━━━━━━━━━━━━━━━━━━━━━━━",
+      result.message,
+      "",
+      `📷 二维码链接：${result.qrcodeImgUrl}`,
+      "",
+      "ℹ️ 请将上方链接发送给用户，或截图二维码给用户扫码",
+      "⏰ 有效期 5 分钟，过期将自动刷新（最多 3 次）",
+      "✅ 扫码成功后将自动创建租户并通知您",
+    ].join("\n"),
+  };
+}
+
 // ── Main handler ──────────────────────────────────
 export function createTenantCommandHandler(api, db) {
   return async (ctx) => {
@@ -406,6 +480,7 @@ export function createTenantCommandHandler(api, db) {
       case "config":  return handleConfig(restArgs);
       case "owner":   return handleOwner(restArgs);
       case "cleanup": return handleCleanup(api, db, restArgs);
+      case "invite":  return handleInvite(db, api.resolvePath("data"), restArgs);
       case "profile": return handleProfile(db, restArgs);
       case "help":
       default:
@@ -420,6 +495,8 @@ export function createTenantCommandHandler(api, db) {
             "/tenant config <id> [--model <m>] [--tools <list>] [--language <lang>]",
             "/tenant owner [list|add|remove] <agentId>",
             "/tenant cleanup [--expired] [--inactive-days <N>] [--dry-run]",
+            "/tenant invite [名称]  ← 生成微信二维码邀请新用户",
+            "/tenant profile <id>",
           ].join("\n"),
         };
     }
