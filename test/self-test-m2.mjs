@@ -125,7 +125,7 @@ assert(tc.overLimit.action === "downgrade", "Tenant overLimit.action = 'downgrad
 assert(tc.language === "zh", "Tenant language = 'zh'");
 
 const unknown = getTenantConfig("nonexistent");
-assert(unknown === null, "getTenantConfig('nonexistent') = null");
+assert(unknown !== null && unknown.quota, "getTenantConfig('nonexistent') returns defaults");
 
 assert(isExpired(testConfig.tenants["expired-bot"].quota) === true, "expired-bot is expired");
 assert(isExpired(tc.quota) === false, "test-bot is not expired");

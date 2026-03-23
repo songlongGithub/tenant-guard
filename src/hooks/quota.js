@@ -11,6 +11,7 @@ import {
   getResetIntervalMs,
   isExpired,
   isOwner,
+  getEffectiveTenantId,
   loadTenantsSync,
 } from "../store/tenants-config.js";
 import { appendNotification } from "../store/notifications.js";
@@ -58,16 +59,15 @@ function buildSystemPrompt(agentId, tenantConfig) {
 
 export function onLlmOutput(db, dataDir) {
   return (event, ctx) => {
-    const agentId = ctx.agentId;
-    if (!agentId || isOwner(agentId)) return;
+    const tenantId = getEffectiveTenantId(ctx);
+    if (!tenantId) return; // Owner or unknown
 
-    const tenantConfig = getTenantConfig(agentId);
-    if (!tenantConfig) return; // unknown agent, skip
+    const tenantConfig = getTenantConfig(tenantId);
 
     // Auto-reset check
     const intervalMs = getResetIntervalMs(tenantConfig.quota);
     if (intervalMs) {
-      checkAndReset(db)(agentId, intervalMs);
+      checkAndReset(db)(tenantId, intervalMs);
     }
 
     // Count tokens
@@ -76,25 +76,25 @@ export function onLlmOutput(db, dataDir) {
     const tokens = inputTokens + outputTokens;
 
     if (tokens === 0) {
-      log.warn(`Agent ${agentId}: usage is null/zero in llm_output`);
+      log.warn(`Tenant ${tenantId}: usage is null/zero in llm_output`);
     }
 
-    addUsage(db, agentId, tokens);
-    log.debug(`Agent ${agentId}: +${tokens} tokens (in=${inputTokens}, out=${outputTokens})`);
+    addUsage(db, tenantId, tokens);
+    log.debug(`Tenant ${tenantId}: +${tokens} tokens (in=${inputTokens}, out=${outputTokens})`);
 
     // Check if first time exceeding limit → write notification
-    const usage = getUsage(db, agentId);
+    const usage = getUsage(db, tenantId);
     const quota = tenantConfig.quota;
     if (
       usage &&
       quota.maxTokens &&
       usage.tokens >= quota.maxTokens &&
-      markNotified(db, agentId)
+      markNotified(db, tenantId)
     ) {
-      log.info(`Agent ${agentId}: exceeded token limit (${usage.tokens}/${quota.maxTokens})`);
-      recordQuotaEvent(db, agentId, "exceeded", `tokens=${usage.tokens}/${quota.maxTokens}`);
+      log.info(`Tenant ${tenantId}: exceeded token limit (${usage.tokens}/${quota.maxTokens})`);
+      recordQuotaEvent(db, tenantId, "exceeded", `tokens=${usage.tokens}/${quota.maxTokens}`);
       appendNotification(dataDir, {
-        agentId,
+        agentId: tenantId,
         type: "exceeded",
         message: `Token 额度用尽（${usage.tokens}/${quota.maxTokens}）`,
       });
@@ -108,16 +108,15 @@ export function onLlmOutput(db, dataDir) {
 
 export function onBeforeToolCall(db) {
   return (event, ctx) => {
-    const agentId = ctx.agentId;
-    if (!agentId || isOwner(agentId)) return;
+    const tenantId = getEffectiveTenantId(ctx);
+    if (!tenantId) return; // Owner
 
-    const tenantConfig = getTenantConfig(agentId);
-    if (!tenantConfig) return;
+    const tenantConfig = getTenantConfig(tenantId);
 
     // 1. Tool permission check (use tenant-specific tools config)
     const denyList = new Set(tenantConfig.tools?.deny || BLOCKED_TOOLS);
     if (denyList.has(event.toolName)) {
-      log.info(`Agent ${agentId}: blocked tool "${event.toolName}"`);
+      log.info(`Tenant ${tenantId}: blocked tool "${event.toolName}"`);
       return { block: true, blockReason: `无操作权限：${event.toolName}` };
     }
 
@@ -126,7 +125,7 @@ export function onBeforeToolCall(db) {
     if (allowList && allowList.length > 0) {
       const allowSet = new Set(allowList);
       if (!allowSet.has(event.toolName) && !event.toolName.startsWith("memory_")) {
-        log.info(`Agent ${agentId}: tool "${event.toolName}" not in allow list`);
+        log.info(`Tenant ${tenantId}: tool "${event.toolName}" not in allow list`);
         return { block: true, blockReason: `不支持的工具：${event.toolName}` };
       }
     }
@@ -137,7 +136,7 @@ export function onBeforeToolCall(db) {
     }
 
     // 3. Quota check
-    const usage = getUsage(db, agentId);
+    const usage = getUsage(db, tenantId);
     if (!usage) return;
 
     const quota = tenantConfig.quota;
@@ -172,15 +171,17 @@ export function onBeforePromptBuild(db, dataDir) {
     if (!agentId) return;
 
     // Owner: notifications injection will be handled in M5
-    if (isOwner(agentId)) return;
+    if (isOwner(ctx)) return;
 
-    const tenantConfig = getTenantConfig(agentId);
-    if (!tenantConfig) return;
+    const tenantId = getEffectiveTenantId(ctx);
+    if (!tenantId) return;
+
+    const tenantConfig = getTenantConfig(tenantId);
 
     const parts = [];
 
     // 1. System prompt / language constraint
-    const systemPrompt = buildSystemPrompt(agentId, tenantConfig);
+    const systemPrompt = buildSystemPrompt(tenantId, tenantConfig);
     if (systemPrompt) {
       parts.push(systemPrompt);
     }
@@ -194,11 +195,11 @@ export function onBeforePromptBuild(db, dataDir) {
     // 3. Auto-reset check
     const intervalMs = getResetIntervalMs(tenantConfig.quota);
     if (intervalMs) {
-      checkAndReset(db)(agentId, intervalMs);
+      checkAndReset(db)(tenantId, intervalMs);
     }
 
     // 4. Usage warning / downgrade notification
-    const usage = getUsage(db, agentId);
+    const usage = getUsage(db, tenantId);
     if (usage) {
       const quota = tenantConfig.quota;
       const tokenRatio = quota.maxTokens ? usage.tokens / quota.maxTokens : 0;
@@ -224,12 +225,12 @@ export function onBeforePromptBuild(db, dataDir) {
     // 5. First-use welcome
     const profile = db
       .prepare("SELECT session_count FROM profiles WHERE agent_id = ?")
-      .get(agentId);
+      .get(tenantId);
     if (!profile || profile.session_count === 0) {
       const quota = tenantConfig.quota;
       const toolsList = (tenantConfig.tools?.allow || []).join("、") || "基础对话";
       const welcome = [
-        `👋 你好！我是 ${tenantConfig.label || agentId}。`,
+        `👋 你好！我是 ${tenantConfig.label || tenantId}。`,
         `📊 体验额度：${quota.maxTokens || "∞"} tokens / ${quota.maxCalls || "∞"} 次调用`,
         quota.expiresAt ? `⏰ 有效期至：${new Date(quota.expiresAt).toLocaleDateString()}` : "",
         `💡 支持的能力：${toolsList}`,

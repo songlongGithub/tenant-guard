@@ -20,6 +20,7 @@ export function createTenantsConfigLoader(dataDir) {
   if (!fs.existsSync(_tenantsPath)) {
     const defaultConfig = {
       ownerAgents: ["main"],
+      ownerPeers: [],
       defaults: {
         quota: { maxTokens: 100000, maxCalls: 50, expiresAt: null, resetInterval: "daily" },
         tools: {
@@ -63,29 +64,73 @@ export function loadTenantsSync() {
 }
 
 /**
- * Check if an agentId is an Owner.
- * @param {string} agentId
+ * Check if a context represents an Owner.
+ * Supports both agentId-only and peer-level checks.
+ * @param {string|{agentId:string, peer?:string}} ctxOrAgentId
  * @returns {boolean}
  */
-export function isOwner(agentId) {
+export function isOwner(ctxOrAgentId) {
   const config = loadTenantsSync();
   const ownerAgents = config.ownerAgents || ["main"];
-  return ownerAgents.includes(agentId);
+  const ownerPeers = config.ownerPeers || [];
+
+  const agentId = typeof ctxOrAgentId === "string" ? ctxOrAgentId : ctxOrAgentId.agentId;
+  const peer = typeof ctxOrAgentId === "string" ? null : ctxOrAgentId.peer;
+
+  if (!ownerAgents.includes(agentId)) return false;
+
+  // If ownerPeers is configured, also check peer identity
+  if (ownerPeers.length > 0 && peer) {
+    return ownerPeers.includes(peer);
+  }
+
+  // No ownerPeers configured → all users on owner agent are Owners
+  return true;
+}
+
+/**
+ * Get the effective tenant ID for a context.
+ * Owner → null (not a tenant).
+ * Named agent (non-main) → agentId.
+ * Main agent with peer → "peer:<peerId>" (virtual tenant).
+ * @param {{ agentId: string, peer?: string }} ctx
+ * @returns {string | null}
+ */
+export function getEffectiveTenantId(ctx) {
+  if (isOwner(ctx)) return null;
+  // Non-owner on 'main' agent → identify by peer
+  if (ctx.agentId === "main" && ctx.peer) {
+    return `peer:${ctx.peer}`;
+  }
+  return ctx.agentId;
 }
 
 /**
  * Get resolved tenant config, merging defaults with tenant-specific overrides.
- * @param {string} agentId
+ * Supports both agentId and "peer:xxx" format keys.
+ * @param {string} tenantId
  * @returns {{ quota, tools, memory, overLimit, language, systemPrompt, label } | null}
  */
-export function getTenantConfig(agentId) {
+export function getTenantConfig(tenantId) {
   const config = loadTenantsSync();
-  const tenant = config.tenants?.[agentId];
-  if (!tenant) return null;
+  const tenant = config.tenants?.[tenantId];
 
+  // For unregistered tenants, apply defaults
   const d = config.defaults || {};
+  if (!tenant) {
+    return {
+      label: tenantId.startsWith("peer:") ? tenantId.slice(5) : tenantId,
+      quota: { ...d.quota },
+      tools: d.tools || { allow: [], deny: [] },
+      memory: { ...d.memory },
+      overLimit: { ...d.overLimit },
+      language: d.language ?? "auto",
+      systemPrompt: d.systemPrompt ?? null,
+    };
+  }
+
   return {
-    label: tenant.label || agentId,
+    label: tenant.label || tenantId,
     quota: { ...d.quota, ...tenant.quota },
     tools: tenant.tools || d.tools || { allow: [], deny: [] },
     memory: { ...d.memory, ...tenant.memory },
