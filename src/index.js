@@ -12,7 +12,7 @@ export default {
   description: "Multi-tenant authorization, quota, memory isolation, and profiling",
   version: "1.0.0",
 
-  async register(api) {
+  register(api) {
     const dataDir = api.resolvePath("data");
     const db = initUsageDb(dataDir);
     const config = createTenantsConfigLoader(dataDir);
