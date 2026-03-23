@@ -111,13 +111,14 @@ async function handleCreate(api, db, args) {
   }
   newConfig.agents.list.push(agentEntry);
 
+  // bindings schema 要求 match 为嵌套对象，channel 不能放顶层
   const binding = {
     agentId: tenantId,
-    channel: args.channel,
+    match: { channel: args.channel },
   };
-  if (args.account) binding.accountId = args.account;
-  if (args.peer) binding.match = { "peer.id": args.peer };
-  if (args["peer-kind"]) binding.match = { ...binding.match, "peer.kind": args["peer-kind"] };
+  if (args.account) binding.match.accountId = args.account;
+  if (args.peer) binding.match.peer = { id: args.peer };
+  if (args["peer-kind"] && binding.match.peer) binding.match.peer.kind = args["peer-kind"];
   newConfig.bindings.push(binding);
 
   // Adjust maxConcurrent
