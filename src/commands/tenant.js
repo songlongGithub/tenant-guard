@@ -185,7 +185,23 @@ async function handleDelete(api, db, tenantId) {
   }
 
   newConfig.agents.list.splice(index, 1);
+
+  // Find channels bound to this tenant before removing bindings
+  const TOKEN_CHANNELS = new Set(["telegram"]);
+  const removedChannels = [];
+  for (const b of (newConfig.agents.bindings || [])) {
+    if (b.agentId === tenantId && b.channel && TOKEN_CHANNELS.has(b.channel)) {
+      removedChannels.push(b.channel);
+    }
+  }
   newConfig.agents.bindings = (newConfig.agents.bindings || []).filter(b => b.agentId !== tenantId);
+
+  // Remove token-based channel configs that belong to this tenant
+  for (const ch of removedChannels) {
+    if (newConfig.channels?.[ch]) {
+      delete newConfig.channels[ch];
+    }
+  }
 
   try {
     await api.runtime.config.writeConfigFile(newConfig);
@@ -204,7 +220,10 @@ async function handleDelete(api, db, tenantId) {
   deleteUsage(db, tenantId);
   recordQuotaEvent(db, tenantId, "deleted", null);
 
-  return { text: `✅ 租户 ${tenantId} 已删除\n⚠️ 需要重启 gateway 生效` };
+  const parts = [`✅ 租户 ${tenantId} 已删除`];
+  if (removedChannels.length > 0) parts.push(`🗑️ 渠道配置已清除: ${removedChannels.join(", ")}`);
+  parts.push(`⚠️ 需要重启 gateway 生效`);
+  return { text: parts.join("\n") };
 }
 
 // ── Command: list ─────────────────────────────────
