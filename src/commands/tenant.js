@@ -455,12 +455,10 @@ async function handleInvite(db, dataDir, args) {
       "━━━━━━━━━━━━━━━━━━━━━━━━",
       result.message,
       "",
-      `📷 二维码链接：${result.qrcodeImgUrl}`,
-      "",
-      "ℹ️ 请将上方链接发送给用户，或截图二维码给用户扫码",
       "⏰ 有效期 5 分钟，过期将自动刷新（最多 3 次）",
       "✅ 扫码成功后将自动创建租户并通知您",
     ].join("\n"),
+    mediaUrl: result.qrcodeImgUrl,
   };
 }
 
