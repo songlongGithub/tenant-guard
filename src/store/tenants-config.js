@@ -65,7 +65,8 @@ export function loadTenantsSync() {
 
 /**
  * Check if a context represents an Owner.
- * Supports both agentId-only and peer-level checks.
+ * Priority: ownerPeers (peer identity) > ownerAgents (agent identity).
+ * When ownerPeers is configured, peer match = Owner regardless of agent routing.
  * @param {string|{agentId:string, peer?:string}} ctxOrAgentId
  * @returns {boolean}
  */
@@ -77,29 +78,28 @@ export function isOwner(ctxOrAgentId) {
   const agentId = typeof ctxOrAgentId === "string" ? ctxOrAgentId : ctxOrAgentId.agentId;
   const peer = typeof ctxOrAgentId === "string" ? null : ctxOrAgentId.peer;
 
-  if (!ownerAgents.includes(agentId)) return false;
-
-  // If ownerPeers is configured, also check peer identity
+  // 1. Peer-level check (highest priority)
+  //    If ownerPeers is configured AND we have a peer, peer decides ownership
   if (ownerPeers.length > 0 && peer) {
     return ownerPeers.includes(peer);
   }
 
-  // No ownerPeers configured → all users on owner agent are Owners
-  return true;
+  // 2. Agent-level check (fallback for non-channel contexts or unconfigured ownerPeers)
+  return ownerAgents.includes(agentId);
 }
 
 /**
  * Get the effective tenant ID for a context.
  * Owner → null (not a tenant).
- * Named agent (non-main) → agentId.
- * Main agent with peer → "peer:<peerId>" (virtual tenant).
+ * Has peer → "peer:<peerId>" (regardless of agent).
+ * No peer → agentId.
  * @param {{ agentId: string, peer?: string }} ctx
  * @returns {string | null}
  */
 export function getEffectiveTenantId(ctx) {
   if (isOwner(ctx)) return null;
-  // Non-owner on 'main' agent → identify by peer
-  if (ctx.agentId === "main" && ctx.peer) {
+  // Identify by peer when available (regardless of which agent routes the message)
+  if (ctx.peer) {
     return `peer:${ctx.peer}`;
   }
   return ctx.agentId;
