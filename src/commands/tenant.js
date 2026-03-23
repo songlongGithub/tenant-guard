@@ -177,14 +177,19 @@ async function handleDelete(api, db, tenantId) {
   if (!tenantId) return { text: "❌ 用法: /tenant delete <id>" };
   if (tenantId === "main") return { text: "❌ 不能删除主 agent" };
 
+  // 以 tenants.json 为权威来源校验租户是否存在
+  const tenantsConfigCheck = loadTenantsSync();
+  if (!tenantsConfigCheck.tenants?.[tenantId]) {
+    return { text: `❌ 租户 ${tenantId} 不存在` };
+  }
+
   const config = api.runtime.config.loadConfig();
   const newConfig = structuredClone(config);
   const index = newConfig.agents?.list?.findIndex(a => a.id === tenantId);
-  if (index === -1 || index === undefined) {
-    return { text: `❌ 租户 ${tenantId} 不存在于 openclaw.json` };
+  // openclaw.json 里可能没有对应条目（手动编辑过），不阻断删除流程
+  if (index !== -1 && index !== undefined) {
+    newConfig.agents.list.splice(index, 1);
   }
-
-  newConfig.agents.list.splice(index, 1);
 
   // Find channels bound to this tenant before removing bindings
   const removedChannels = [];
@@ -207,7 +212,7 @@ async function handleDelete(api, db, tenantId) {
   }
 
   // Clean tenants.json
-  const tenantsConfig = loadTenantsSync();
+  const tenantsConfig = tenantsConfigCheck;
   if (tenantsConfig.tenants?.[tenantId]) {
     delete tenantsConfig.tenants[tenantId];
     writeTenantsConfig(tenantsConfig);
