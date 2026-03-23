@@ -187,20 +187,17 @@ async function handleDelete(api, db, tenantId) {
   newConfig.agents.list.splice(index, 1);
 
   // Find channels bound to this tenant before removing bindings
-  const TOKEN_CHANNELS = new Set(["telegram"]);
   const removedChannels = [];
   for (const b of (newConfig.agents.bindings || [])) {
-    if (b.agentId === tenantId && b.channel && TOKEN_CHANNELS.has(b.channel)) {
+    if (b.agentId === tenantId && b.channel && newConfig.channels?.[b.channel]) {
       removedChannels.push(b.channel);
     }
   }
   newConfig.agents.bindings = (newConfig.agents.bindings || []).filter(b => b.agentId !== tenantId);
 
-  // Remove token-based channel configs that belong to this tenant
+  // Remove channel configs that belong to this tenant
   for (const ch of removedChannels) {
-    if (newConfig.channels?.[ch]) {
-      delete newConfig.channels[ch];
-    }
+    delete newConfig.channels[ch];
   }
 
   try {
