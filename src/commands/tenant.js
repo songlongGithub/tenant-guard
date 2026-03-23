@@ -99,15 +99,9 @@ async function handleCreate(api, db, args) {
   newConfig.agents.list ??= [];
   newConfig.bindings ??= []; // 顶层 bindings，非 agents.bindings
 
+  // tools 权限由 tenant-guard hook 管理，agent 条目不设置 tools 避免与 API 冲突
   const agentEntry = {
     id: tenantId,
-    tools: {
-      profile: "minimal",
-      allow: args.tools
-        ? args.tools.split(",").map(s => s.trim())
-        : ["read", "web_search", "image", "memory_search", "memory_get"],
-      deny: ["exec", "write", "edit", "session_status"],
-    },
   };
   if (args.model) {
     agentEntry.model = { primary: args.model, fallbacks: [] };
