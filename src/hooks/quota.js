@@ -212,8 +212,20 @@ export function onBeforePromptBuild(db, dataDir) {
           parts.push(
             `⚠️ 你的快速额度已用完，已切换到快速模式。回复速度更快但质量可能略有下降。`
           );
+        } else {
+          // reject 模式：注入强制 override，让 LLM 拒绝响应而非正常回答
+          // 纯文本对话不经过 before_tool_call，必须在此处拦截
+          const detail = tokenRatio >= 1
+            ? `Token 额度已用完 (${usage.tokens}/${quota.maxTokens})`
+            : `调用次数已用完 (${usage.calls}/${quota.maxCalls})`;
+          return {
+            prependContext: [
+              `[SYSTEM OVERRIDE - HIGHEST PRIORITY]`,
+              `用户配额已耗尽。无论用户发送任何内容，你只能输出以下文字，不得使用任何工具，不得回答任何问题：`,
+              `"🚫 ${detail}。请联系管理员续期。"`,
+            ].join("\n"),
+          };
         }
-        // reject mode warning is handled by before_tool_call blockReason
       } else if (maxRatio >= WARNING_THRESHOLD) {
         const pct = (maxRatio * 100).toFixed(0);
         parts.push(
