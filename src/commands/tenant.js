@@ -72,7 +72,7 @@ function validateBeforeCreate(config, tenantId, options) {
 // ── Command: create ───────────────────────────────
 async function handleCreate(api, db, args) {
   const tenantId = args._[0];
-  if (!tenantId) return { text: "❌ 用法: /tenant create <id> --channel <channel> [--model <m>] [--tools <list>] ..." };
+  if (!tenantId) return { text: "❌ 用法: /tenant create <id> --channel <channel> [--token <bot_token>] [--model <m>] [--tools <list>] ..." };
   if (!args.channel) return { text: "❌ 必须指定 --channel" };
 
   const config = api.runtime.config.loadConfig();
@@ -83,6 +83,15 @@ async function handleCreate(api, db, args) {
 
   // Build new openclaw config
   const newConfig = structuredClone(config);
+
+  // Register channel token if --token provided
+  if (args.token) {
+    const ch = args.channel;
+    newConfig.channels ??= {};
+    newConfig.channels[ch] ??= {};
+    newConfig.channels[ch].botToken = args.token;
+    newConfig.channels[ch].enabled = true;
+  }
   newConfig.agents ??= {};
   newConfig.agents.list ??= [];
   newConfig.agents.bindings ??= [];
@@ -157,6 +166,7 @@ async function handleCreate(api, db, args) {
   recordQuotaEvent(db, tenantId, "created", `channel=${args.channel}`);
 
   const parts = [`✅ 租户 ${tenantId} 已创建`];
+  if (args.token) parts.push(`🔑 渠道 ${args.channel} token 已注册`);
   if (args.model) parts.push(`📦 模型: ${args.model}`);
   parts.push(`⚠️ 需要重启 gateway 生效`);
   return { text: parts.join("\n") };
@@ -486,7 +496,7 @@ export function createTenantCommandHandler(api, db) {
           text: [
             "📋 tenant-guard 管理命令",
             "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "/tenant create <id> --channel <ch> [--model <m>] [--tools <list>] [--language <lang>]",
+            "/tenant create <id> --channel <ch> [--token <bot_token>] [--model <m>] [--tools <list>] [--language <lang>]",
             "/tenant delete <id>",
             "/tenant list",
             "/tenant quota <id> [--tokens <n>] [--calls <n>] [--expires <ISO>] [--reset]",
