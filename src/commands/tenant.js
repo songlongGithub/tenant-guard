@@ -91,6 +91,9 @@ async function handleCreate(api, db, args) {
     newConfig.channels[ch] ??= {};
     newConfig.channels[ch].botToken = args.token;
     newConfig.channels[ch].enabled = true;
+    // 默认开放群聊，避免 groupPolicy:allowlist 导致群消息被静默丢弃
+    newConfig.channels[ch].groupPolicy ??= "open";
+    newConfig.channels[ch].dmPolicy ??= "pairing";
   }
   newConfig.agents ??= {};
   newConfig.agents.list ??= [];
