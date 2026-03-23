@@ -17,7 +17,8 @@ import {
 import { appendNotification } from "../store/notifications.js";
 import { log } from "../utils/logger.js";
 
-const BLOCKED_TOOLS = new Set(["exec", "write", "edit", "session_status"]);
+// exec/session_status 永远拒绝；write/edit 由 workspace 白名单控制，不在此处全局拦截
+const BLOCKED_TOOLS = new Set(["exec", "session_status"]);
 const WARNING_THRESHOLD = 0.8;
 
 /**
@@ -116,16 +117,31 @@ export function onBeforeToolCall(db) {
     // 1. Tool permission check (use tenant-specific tools config)
     const denyList = new Set(tenantConfig.tools?.deny || BLOCKED_TOOLS);
     if (denyList.has(event.toolName)) {
-      log.info(`Tenant ${tenantId}: blocked tool "${event.toolName}"`);
+      log.info(`[tools:${event.toolName}] blocked tool for tenant ${tenantId}`);
       return { block: true, blockReason: `无操作权限：${event.toolName}` };
     }
 
-    // If allow list is defined, check allowlist (allow takes precedence pattern)
+    // 2. write/edit：路径级白名单，只允许写 agent 自己的 workspace 目录
+    // event.params 为工具入参（源码确认字段名为 params）
+    if (event.toolName === "write" || event.toolName === "edit") {
+      const agentId = ctx.agentId || tenantId;
+      // openclaw write tool 参数可能为 file_path 或 path
+      const targetPath = event.params?.file_path ?? event.params?.path ?? "";
+      const workspacePrefix = `/home/node/.openclaw/workspace-${agentId}/`;
+      if (!targetPath.startsWith(workspacePrefix)) {
+        log.info(`[tools:${event.toolName}] blocked path outside workspace for ${tenantId}: ${targetPath}`);
+        return { block: true, blockReason: `无文件写入权限（仅限 workspace 目录）` };
+      }
+      // 路径合法，跳过 allowlist 检查直接放行
+      return;
+    }
+
+    // 3. Allowlist check（write/edit 已在上方单独处理，此处排除）
     const allowList = tenantConfig.tools?.allow;
     if (allowList && allowList.length > 0) {
       const allowSet = new Set(allowList);
       if (!allowSet.has(event.toolName) && !event.toolName.startsWith("memory_")) {
-        log.info(`Tenant ${tenantId}: tool "${event.toolName}" not in allow list`);
+        log.info(`[tools:${event.toolName}] not in allow list for tenant ${tenantId}`);
         return { block: true, blockReason: `不支持的工具：${event.toolName}` };
       }
     }
