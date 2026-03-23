@@ -168,7 +168,9 @@ async function handleCreate(api, db, args) {
   const parts = [`✅ 租户 ${tenantId} 已创建`];
   if (args.token) parts.push(`🔑 渠道 ${args.channel} token 已注册`);
   if (args.model) parts.push(`📦 模型: ${args.model}`);
-  parts.push(`⚠️ 需要重启 gateway 生效`);
+  parts.push(`🔄 Gateway 正在重启以加载新配置...`);
+  // 延迟退出，让响应先发回给用户；docker restart:always 会自动重启容器
+  setTimeout(() => { log.info("Restarting gateway after tenant create"); process.exit(0); }, 800);
   return { text: parts.join("\n") };
 }
 
@@ -226,7 +228,9 @@ async function handleDelete(api, db, tenantId) {
 
   const parts = [`✅ 租户 ${tenantId} 已删除`];
   if (removedChannels.length > 0) parts.push(`🗑️ 渠道配置已清除: ${removedChannels.join(", ")}`);
-  parts.push(`⚠️ 需要重启 gateway 生效`);
+  parts.push(`🔄 Gateway 正在重启以加载新配置...`);
+  // 延迟退出，让响应先发回给用户；docker restart:always 会自动重启容器
+  setTimeout(() => { log.info("Restarting gateway after tenant delete"); process.exit(0); }, 800);
   return { text: parts.join("\n") };
 }
 
